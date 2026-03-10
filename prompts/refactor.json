@@ -1,0 +1,13 @@
+{
+  "prompt": "Refactor the specified code to improve its quality without changing behavior.",
+  "steps": [
+    "Read and understand the current implementation thoroughly.",
+    "Identify the specific quality issues to address (complexity, duplication, naming, structure).",
+    "Plan the refactoring approach — ensure behavior is preserved.",
+    "Implement the refactoring in small, logical steps.",
+    "Run the existing test suite after each significant change to verify no regressions.",
+    "Run the linter and fix any violations.",
+    "Commit with a message that explains what was refactored and why."
+  ],
+  "extra_instructions": "Do NOT change any public interfaces or behavior. If tests need updating because of internal restructuring, update them. Do not add new features or fix unrelated bugs during a refactor."
+}

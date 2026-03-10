@@ -1,0 +1,12 @@
+{
+  "prompt": "Implement the following feature or change.",
+  "steps": [
+    "Research the codebase to understand the existing patterns and conventions.",
+    "Implement the required changes following existing code style.",
+    "Add or update tests to cover the new functionality.",
+    "Run the test suite and fix any failures.",
+    "Run the linter and fix any violations.",
+    "Commit with a clear, descriptive commit message."
+  ],
+  "extra_instructions": "Make the minimal set of changes needed. Follow existing patterns in the codebase. Do not refactor unrelated code."
+}

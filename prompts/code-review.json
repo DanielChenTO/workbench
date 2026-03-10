@@ -1,0 +1,11 @@
+{
+  "prompt": "Review the code changes on the current branch against the default branch.",
+  "steps": [
+    "Run `git diff main...HEAD` to see all changes on this branch.",
+    "Run `git diff --stat main...HEAD` for a summary of changed files.",
+    "Evaluate each changed file for: correctness, completeness, error handling, security, and code quality.",
+    "Classify each finding by severity: P0 (blocking), P1 (important), P2 (suggestion).",
+    "Output findings in the structured format specified below."
+  ],
+  "extra_instructions": "Output your review in this EXACT format:\n\n## Findings\n\n- P0: <description> (`file/path.py:42`)\n- P1: <description> (`file/path.py:100-110`)\n- P2: <description>\n\n## Verdict\n\nAPPROVE\n\nOR:\n\n## Verdict\n\nREJECT: <one-line reason>\n\nRules:\n- Any P0 finding MUST result in REJECT.\n- Cite file and line numbers whenever possible.\n- Be specific and actionable.\n- Do NOT make any code changes."
+}

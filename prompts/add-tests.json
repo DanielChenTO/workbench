@@ -1,0 +1,12 @@
+{
+  "prompt": "Add comprehensive test coverage for the specified module or function.",
+  "steps": [
+    "Read the target module to understand all public functions and their contracts.",
+    "Identify existing tests (if any) and note coverage gaps.",
+    "Write tests covering: happy path, edge cases, error conditions, and boundary values.",
+    "Follow the project's existing test patterns and fixtures.",
+    "Run the test suite to verify all new tests pass.",
+    "Run the linter on the new test file."
+  ],
+  "extra_instructions": "Use descriptive test names that explain the scenario being tested. Mock external dependencies. Each test should test ONE thing. Aim for at least 90% line coverage of the target module."
+}

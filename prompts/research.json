@@ -1,0 +1,11 @@
+{
+  "prompt": "Research the following topic in the codebase and produce a structured summary.",
+  "steps": [
+    "Identify all files and modules relevant to the topic.",
+    "Trace the data flow or control flow end-to-end.",
+    "List entry points, key functions, and external dependencies.",
+    "Note any existing tests and their coverage of the topic.",
+    "Summarize findings in a structured format: Overview, Key Files, Data Flow, Gaps, Recommendations."
+  ],
+  "extra_instructions": "Be specific — include file paths and line numbers. Do NOT make any code changes. Output your findings as your final response. Keep output under 200 lines."
+}

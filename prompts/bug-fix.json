@@ -1,0 +1,12 @@
+{
+  "prompt": "Fix the following bug.",
+  "steps": [
+    "Reproduce or locate the bug based on the description.",
+    "Identify the root cause by tracing the relevant code paths.",
+    "Implement the fix with minimal changes to affected code.",
+    "Add a regression test that would have caught this bug.",
+    "Run the full test suite to ensure no regressions.",
+    "Commit with a message that references the bug and explains the fix."
+  ],
+  "extra_instructions": "Focus on the root cause, not symptoms. If the fix requires changes in multiple files, explain the relationship between changes in the commit message."
+}

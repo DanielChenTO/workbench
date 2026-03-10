@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: workbench-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: workbench
+      POSTGRES_PASSWORD: workbench_dev
+      POSTGRES_DB: workbench
+    ports:
+      - "5433:5432"   # Non-default host port to avoid conflicts
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U workbench"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
+    name: workbench-pgdata
