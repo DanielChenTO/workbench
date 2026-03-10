@@ -346,7 +346,7 @@ DASHBOARD_HTML = """\
   .report-failure .error-text { color: var(--red); font-size: 11px; margin-top: 2px; }
 
   /* ===== Kanban Board (embedded tab) ===== */
-  #tab-board {
+  #tab-board.active {
     display: flex; flex-direction: column; height: calc(100vh - 200px); overflow: hidden;
   }
   .kb-toolbar {
