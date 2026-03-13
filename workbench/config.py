@@ -126,14 +126,8 @@ class Settings(BaseSettings):
             return self.references_dir
         return self.workspace_root / "work-directory" / "references"
 
-    @property
-    def known_repos(self) -> dict[str, Path]:
-        """Map of repo short names to their absolute paths, auto-discovered from workspace root.
-
-        The result is cached on first access since repos don't appear/disappear at runtime.
-        """
-        if self._known_repos_cache is not None:
-            return self._known_repos_cache
+    def refresh_known_repos(self) -> dict[str, Path]:
+        """Re-scan workspace_root and refresh the known repository cache."""
         repos: dict[str, Path] = {}
         if not self.workspace_root.is_dir():
             self._known_repos_cache = repos
@@ -144,18 +138,47 @@ class Settings(BaseSettings):
         self._known_repos_cache = repos
         return repos
 
+    @property
+    def known_repos(self) -> dict[str, Path]:
+        """Map of repo short names to absolute paths, discovered under workspace_root.
+
+        The first call populates a cache. Call ``refresh_known_repos`` when you
+        need to re-scan the filesystem (for example after workspace changes).
+        """
+        if self._known_repos_cache is not None:
+            return self._known_repos_cache
+        return self.refresh_known_repos()
+
     def resolve_repo_path(self, repo_name: str | None) -> Path | None:
-        """Resolve a repo short name to its absolute path. Returns None if not found."""
+        """Resolve a repo short name to an absolute path.
+
+        Performs exact then unique-partial matching. If the cached repo list
+        misses, re-scans once before returning None so runtime execution does not
+        fail because of stale startup cache.
+        """
         if repo_name is None:
             return None
+
+        query = repo_name.strip()
+        if not query:
+            return None
+
+        def _lookup(name: str, repos: dict[str, Path]) -> Path | None:
+            if name in repos:
+                return repos[name]
+            matches = [repo for repo in repos if name in repo]
+            if len(matches) == 1:
+                return repos[matches[0]]
+            return None
+
         repos = self.known_repos
-        if repo_name in repos:
-            return repos[repo_name]
-        # Try partial match
-        matches = [name for name in repos if repo_name in name]
-        if len(matches) == 1:
-            return repos[matches[0]]
-        return None
+        resolved = _lookup(query, repos)
+        if resolved is not None:
+            return resolved
+
+        # Runtime safety: one cache refresh on miss, then retry.
+        repos = self.refresh_known_repos()
+        return _lookup(query, repos)
 
 
 # Singleton — import this instance everywhere.

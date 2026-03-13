@@ -137,6 +137,10 @@ make migrate-new msg="add foo column"   # create new migration
 
 All settings use the `WORKBENCH_` prefix and can be set via environment variables or `.env` file.
 
+Repo discovery is cached after first access for performance. Runtime repo resolution now re-scans
+the workspace once on cache miss, which avoids false "unknown repository" failures when the
+workspace changes after startup (for example, new repos or worktrees appearing).
+
 | Variable | Default | Description |
 |---|---|---|
 | `WORKSPACE_ROOT` | auto-detected | Directory containing your git repos |

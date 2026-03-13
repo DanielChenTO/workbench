@@ -5,10 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
-
 from workbench.config import Settings, _detect_workspace_root
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -100,6 +97,22 @@ class TestResolveRepoPath:
     def test_none_input(self, tmp_path: Path) -> None:
         s = Settings(workspace_root=tmp_path)
         assert s.resolve_repo_path(None) is None
+
+    def test_refreshes_cache_on_miss(self, tmp_path: Path) -> None:
+        """resolve_repo_path should re-scan once when cached repos miss."""
+        _make_fake_repos(tmp_path, ["alpha"])
+        s = Settings(workspace_root=tmp_path)
+
+        # Prime cache with only alpha
+        assert s.resolve_repo_path("alpha") == tmp_path / "alpha"
+
+        # Add repo after cache creation; resolution should refresh and find it.
+        _make_fake_repos(tmp_path, ["workbench"])
+        assert s.resolve_repo_path("workbench") == tmp_path / "workbench"
+
+    def test_empty_string_input(self, tmp_path: Path) -> None:
+        s = Settings(workspace_root=tmp_path)
+        assert s.resolve_repo_path("") is None
 
 
 # ---------------------------------------------------------------------------
