@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
@@ -27,14 +26,18 @@ from workbench.models import (
     TaskInputType,
     TaskListResponse,
     TaskStatus,
+    WorkflowMemoryCreate,
+    WorkflowMemoryInfo,
+    WorkflowMemoryListResponse,
     schedule_row_to_info,
     task_row_to_info,
+    workflow_memory_row_to_info,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_task_row(**overrides) -> SimpleNamespace:
     """Build a minimal fake DB row suitable for task_row_to_info."""
@@ -99,6 +102,26 @@ def _make_schedule_row(**overrides) -> SimpleNamespace:
     return SimpleNamespace(**defaults)
 
 
+def _make_workflow_memory_row(**overrides) -> SimpleNamespace:
+    """Build a minimal fake DB row suitable for workflow_memory_row_to_info."""
+    now = datetime.now(UTC)
+    defaults = dict(
+        id="mem-001",
+        repo="workbench",
+        kind="summary",
+        tags=None,
+        summary="stage summary",
+        artifact_ref="artifact-1",
+        artifact_path="work-directory/references/memory.md",
+        task_id=None,
+        pipeline_id=None,
+        created_at=now,
+        updated_at=now,
+    )
+    defaults.update(overrides)
+    return SimpleNamespace(**defaults)
+
+
 # ===========================================================================
 # Enum tests
 # ===========================================================================
@@ -133,8 +156,15 @@ class TestAutonomy:
 class TestTaskStatus:
     def test_all_values(self):
         expected = {
-            "queued", "resolving", "running", "creating_pr",
-            "blocked", "stuck", "completed", "failed", "cancelled",
+            "queued",
+            "resolving",
+            "running",
+            "creating_pr",
+            "blocked",
+            "stuck",
+            "completed",
+            "failed",
+            "cancelled",
         }
         assert {s.value for s in TaskStatus} == expected
 
@@ -476,11 +506,13 @@ class TestPipelineCreate:
         assert pc.model is None
 
     def test_multiple_stages(self):
-        pc = PipelineCreate(stages=[
-            self._make_stage("explore"),
-            self._make_stage("implement"),
-            self._make_stage("review"),
-        ])
+        pc = PipelineCreate(
+            stages=[
+                self._make_stage("explore"),
+                self._make_stage("implement"),
+                self._make_stage("review"),
+            ]
+        )
         assert len(pc.stages) == 3
         assert pc.stages[0].name == "explore"
         assert pc.stages[2].name == "review"
@@ -641,6 +673,90 @@ class TestScheduleInfo:
         assert info.last_run_at is None
         assert info.next_run_at is None
         assert info.error is None
+
+
+# ===========================================================================
+# Workflow memory models and converter
+# ===========================================================================
+
+
+class TestWorkflowMemoryCreate:
+    def test_minimal(self):
+        m = WorkflowMemoryCreate(repo="workbench", kind="summary", artifact_ref="artifact-1")
+        assert m.repo == "workbench"
+        assert m.kind == "summary"
+        assert m.artifact_ref == "artifact-1"
+        assert m.tags is None
+
+    def test_all_fields(self):
+        m = WorkflowMemoryCreate(
+            repo="workbench",
+            kind="decision",
+            artifact_ref="artifact-2",
+            tags=["pipeline", "review"],
+            summary="decision summary",
+            artifact_path="work-directory/references/decisions.md",
+            task_id="task123",
+            pipeline_id="pipe123",
+        )
+        assert m.tags == ["pipeline", "review"]
+        assert m.task_id == "task123"
+        assert m.pipeline_id == "pipe123"
+
+
+class TestWorkflowMemoryInfo:
+    def test_construction(self):
+        now = datetime.now(UTC)
+        info = WorkflowMemoryInfo(
+            id="mem-1",
+            repo="workbench",
+            kind="summary",
+            artifact_ref="artifact-1",
+            tags=["pipeline"],
+            summary="summary",
+            created_at=now,
+            updated_at=now,
+        )
+        assert info.id == "mem-1"
+        assert info.repo == "workbench"
+        assert info.tags == ["pipeline"]
+
+
+class TestWorkflowMemoryListResponse:
+    def test_construction(self):
+        now = datetime.now(UTC)
+        info = WorkflowMemoryInfo(
+            id="mem-1",
+            repo="workbench",
+            kind="summary",
+            artifact_ref="artifact-1",
+            created_at=now,
+            updated_at=now,
+        )
+        resp = WorkflowMemoryListResponse(memories=[info], total=1)
+        assert len(resp.memories) == 1
+        assert resp.total == 1
+
+
+class TestWorkflowMemoryRowToInfo:
+    def test_basic_conversion(self):
+        row = _make_workflow_memory_row()
+        info = workflow_memory_row_to_info(row)
+        assert info.id == "mem-001"
+        assert info.repo == "workbench"
+        assert info.kind == "summary"
+        assert info.artifact_ref == "artifact-1"
+        assert info.tags is None
+
+    def test_tags_json_parsed(self):
+        row = _make_workflow_memory_row(tags='["pipeline", "implement"]')
+        info = workflow_memory_row_to_info(row)
+        assert info.tags == ["pipeline", "implement"]
+
+    def test_invalid_tags_json(self):
+        row = _make_workflow_memory_row(tags="{invalid")
+        info = workflow_memory_row_to_info(row)
+        assert info.tags is None
 
 
 # ===========================================================================
