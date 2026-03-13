@@ -14,6 +14,44 @@ from workbench.bootstrap_machine import (
 )
 
 
+def _manual_prerequisites(config: BootstrapConfig) -> list[str]:
+    if config.database_url:
+        return [
+            "Ensure the external Postgres instance is reachable from this machine",
+        ]
+    return [
+        "Ensure Docker is running before starting workbench",
+    ]
+
+
+def _print_bootstrap_summary(config: BootstrapConfig) -> None:
+    serve_cmd = config.workspace_root / ".opencode" / "scripts" / "workbench-serve.sh"
+    print("Bootstrap completed.")
+    print("")
+    print("Auto-wired during bootstrap:")
+    print("  - Workbench repository cloned or re-used")
+    print("  - Python virtual environment created")
+    print("  - Workbench package installed in editable mode")
+    if not config.database_url:
+        print("  - Local Postgres started via docker compose")
+    print("  - Database migrations applied")
+    print("  - Workspace OpenCode integration installed")
+    if config.install_opencode_dependencies:
+        print(f"  - .opencode dependencies installed via {config.package_manager}")
+
+    print("")
+    print("Manual prerequisites/steps remaining:")
+    for item in _manual_prerequisites(config):
+        print(f"  - {item}")
+    print("  - Keep the workbench service running in a dedicated terminal")
+
+    print("")
+    print("Next commands:")
+    print(f"  1. Start workbench: {serve_cmd}")
+    print("  2. Verify health: workbench doctor")
+    print("  3. Verify setup: workbench smoke-test")
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Bootstrap workbench on this machine and wire it into an OpenCode workspace."
@@ -93,10 +131,7 @@ def main() -> int:
 
     execute_plan(steps)
     print("")
-    print("Bootstrap completed.")
-    print(
-        f"Start workbench with: {config.workspace_root / '.opencode' / 'scripts' / 'workbench-serve.sh'}"
-    )
+    _print_bootstrap_summary(config)
     return 0
 
 
