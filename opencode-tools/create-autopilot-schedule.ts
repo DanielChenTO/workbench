@@ -1,5 +1,7 @@
 import { tool } from "@opencode-ai/plugin/tool"
 
+import { buildLocalAutopilotPrompt } from "./shared-outcome-contract"
+
 export default tool({
   description:
     "Create a recurring workbench schedule that re-dispatches local autopilot. " +
@@ -15,16 +17,7 @@ export default tool({
     const baseUrl = process.env.WORKBENCH_URL || "http://127.0.0.1:8420"
     const payload = {
       type: "prompt",
-      source: [
-        "# Local Autopilot Orchestrator",
-        "",
-        "Continue local-safe work until blocked.",
-        "Never push or create PRs.",
-        "Use backlog and logs to choose the next item.",
-        "",
-        "Goal:",
-        args.goal,
-      ].join("\n"),
+      source: buildLocalAutopilotPrompt(args.goal, "compact"),
       role: "orchestrator",
       autonomy: "local",
       timeout: 7200,

@@ -1,5 +1,7 @@
 import { tool } from "@opencode-ai/plugin/tool"
 
+import { buildLocalAutopilotPrompt } from "./shared-outcome-contract"
+
 export default tool({
   description:
     "Dispatch a local-only continuation orchestrator that keeps working through backlog items " +
@@ -28,7 +30,7 @@ export default tool({
       return "Please provide a fuller goal for local autopilot continuation."
     }
 
-    const source = buildPrompt(goal)
+    const source = buildLocalAutopilotPrompt(goal, "full")
     const payload: Record<string, unknown> = {
       type: "prompt",
       source,
@@ -73,24 +75,3 @@ export default tool({
     }
   },
 })
-
-function buildPrompt(goal: string): string {
-  return [
-    "# Local Autopilot Orchestrator",
-    "",
-    "You are a local-only orchestrator. Keep making progress without asking for more input unless truly blocked.",
-    "",
-    "Rules:",
-    "- Only local-safe work is allowed.",
-    "- Never push or create PRs.",
-    "- Use workbench todos tagged with 'autopilot' as the primary backlog.",
-    "- Mirror todo state into work-directory/backlog.md so humans can inspect the queue easily.",
-    "- Use the backlog, todos, and recent log entries to choose the next task.",
-    "- For normal code changes, use the default workflow: explore -> implement -> validate -> review.",
-    "- Failed validation requires a human-review report and the item should be parked in a review queue.",
-    "- Continue to the next local-safe item until no such item remains.",
-    "",
-    "Goal:",
-    goal,
-  ].join("\n")
-}
