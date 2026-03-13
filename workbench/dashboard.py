@@ -1834,6 +1834,7 @@ const KB_COLUMNS = [
 let kbTodos = [];
 let kbCoverageByTodoId = {};
 let kbCoverageSummary = null;
+let kbCoverageLoadError = false;
 let kbAutoRefreshTimer = null;
 let kbAutoRefreshOn = false;
 let kbDraggedCardId = null;
@@ -1854,29 +1855,59 @@ function kbStopAutoRefresh() {
 // --- Kanban API ---
 async function kbFetchTodos() {
   try {
-    const todosReq = apiFetch(API + '/todos?limit=500');
-    const coverageReq = apiFetch(API + '/todos/coverage?recent_hours=72');
-    const pair = await Promise.all([todosReq, coverageReq]);
-
-    const data = await pair[0].json();
-    const coverageData = await pair[1].json();
+    const r = await apiFetch(API + '/todos?limit=500');
+    const data = await r.json();
 
     kbTodos = Array.isArray(data) ? data : (data.todos || []);
-    kbCoverageByTodoId = {};
-    (coverageData.coverages || []).forEach(function(c) { kbCoverageByTodoId[c.todo_id] = c; });
-    kbCoverageSummary = coverageData.summary || null;
 
-    if (kbCoverageSummary) {
-      var label = document.getElementById('kbRefreshLabel');
-      if (label) {
-        label.textContent = kbCoverageSummary.uncovered_todos + ' needs task';
-      }
-    }
+    await kbFetchCoverageBestEffort();
 
     kbApplyFilters();
   } catch (e) {
     showToast('Failed to load todos: ' + e.message, 'error');
   }
+}
+
+async function kbFetchCoverageBestEffort() {
+  const COVERAGE_TIMEOUT_MS = 4000;
+  try {
+    const coverageResponse = await Promise.race([
+      apiFetch(API + '/todos/coverage?recent_hours=72'),
+      new Promise(function(_, reject) {
+        setTimeout(function() {
+          reject(new Error('coverage request timed out'));
+        }, COVERAGE_TIMEOUT_MS);
+      }),
+    ]);
+    const coverageData = await coverageResponse.json();
+    kbCoverageByTodoId = {};
+    (coverageData.coverages || []).forEach(function(c) { kbCoverageByTodoId[c.todo_id] = c; });
+    kbCoverageSummary = coverageData.summary || null;
+    kbCoverageLoadError = false;
+    kbUpdateRefreshLabel();
+  } catch (e) {
+    kbCoverageByTodoId = {};
+    kbCoverageSummary = null;
+    kbCoverageLoadError = true;
+    kbUpdateRefreshLabel();
+    console.warn('Coverage unavailable; rendering todos without coverage details', e);
+  }
+}
+
+function kbUpdateRefreshLabel() {
+  var label = document.getElementById('kbRefreshLabel');
+  if (!label) return;
+
+  var parts = [];
+  if (kbAutoRefreshOn) {
+    parts.push('every 30s');
+  }
+  if (kbCoverageSummary) {
+    parts.push(kbCoverageSummary.uncovered_todos + ' needs task');
+  } else if (kbCoverageLoadError) {
+    parts.push('coverage unavailable');
+  }
+  label.textContent = parts.join(' · ');
 }
 
 // --- Kanban Render ---
@@ -2275,16 +2306,14 @@ function kbDeleteDetail() {
 function kbToggleAutoRefresh() {
   kbAutoRefreshOn = !kbAutoRefreshOn;
   var btn = document.getElementById('kbAutoRefreshBtn');
-  var label = document.getElementById('kbRefreshLabel');
   if (kbAutoRefreshOn) {
     btn.classList.add('active');
-    label.textContent = 'every 30s';
     kbAutoRefreshTimer = setInterval(kbFetchTodos, 30000);
   } else {
     btn.classList.remove('active');
-    label.textContent = '';
     kbStopAutoRefresh();
   }
+  kbUpdateRefreshLabel();
 }
 
 // --- Refresh ---

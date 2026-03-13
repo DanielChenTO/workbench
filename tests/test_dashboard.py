@@ -543,6 +543,31 @@ class TestKanbanBoard:
         )
 
 
+class TestKanbanCoverageResilience:
+    """Board coverage fetch should be best-effort, never all-or-nothing."""
+
+    def test_todos_and_coverage_not_loaded_via_promise_all(self):
+        """A coverage failure must not block /todos rendering."""
+        script = _extract_script(DASHBOARD_HTML)
+        assert "Promise.all([todosReq, coverageReq])" not in script
+
+    def test_best_effort_coverage_helper_exists(self):
+        """Coverage fetch should be isolated behind a best-effort helper."""
+        script = _extract_script(DASHBOARD_HTML)
+        assert "async function kbFetchCoverageBestEffort(" in script
+
+    def test_coverage_timeout_guard_exists(self):
+        """Coverage requests should time out rather than hanging board refresh."""
+        script = _extract_script(DASHBOARD_HTML)
+        assert "Promise.race([" in script
+        assert "coverage request timed out" in script
+
+    def test_degraded_coverage_label_exists(self):
+        """UI should clearly show when coverage is unavailable."""
+        script = _extract_script(DASHBOARD_HTML)
+        assert "coverage unavailable" in script
+
+
 # ---------------------------------------------------------------------------
 # Security / XSS prevention tests
 # ---------------------------------------------------------------------------
