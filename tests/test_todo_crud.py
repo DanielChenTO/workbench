@@ -672,8 +672,9 @@ def _make_task_info(
     summary: str | None = None,
     pipeline_id: str | None = None,
     stage_name: str | None = None,
+    created_at: datetime | None = None,
 ) -> TaskInfo:
-    now = datetime.now(UTC)
+    now = created_at or datetime.now(UTC)
     return TaskInfo(
         id=id,
         input=TaskCreate(
@@ -744,6 +745,41 @@ class TestTodoCoverageHelpers:
 
         assert _task_matches_todo(todo, task, repo_hints=[]) is True
 
+    def test_task_does_not_match_short_source_ref_substring(self):
+        now = datetime.now(UTC)
+        todo = TodoInfo(
+            id="todo-1",
+            title="Core tracking",
+            source_ref="core",
+            created_at=now,
+            updated_at=now,
+        )
+        task = _make_task_info(
+            id="task-1",
+            source="Investigate hardcore retry behavior",
+            status=TaskStatus.RUNNING,
+        )
+
+        assert _task_matches_todo(todo, task, repo_hints=[]) is False
+
+    def test_task_matches_exact_repo_hint_via_task_repo_field(self):
+        now = datetime.now(UTC)
+        todo = TodoInfo(
+            id="todo-1",
+            title="Repo-bound work",
+            tags=["repo:terraform-enterprise"],
+            created_at=now,
+            updated_at=now,
+        )
+        task = _make_task_info(
+            id="task-1",
+            source="Investigate rollout",
+            status=TaskStatus.RUNNING,
+            repo="terraform-enterprise",
+        )
+
+        assert _task_matches_todo(todo, task, repo_hints=["terraform-enterprise"]) is True
+
 
 class TestTodoCoverageRoute:
     @pytest.mark.asyncio
@@ -784,17 +820,32 @@ class TestTodoCoverageRoute:
                 "workbench.main.list_todos", AsyncMock(return_value=[linked_todo, unlinked_todo])
             ):
                 with patch(
-                    "workbench.main.list_tasks_since", AsyncMock(return_value=[object(), object()])
+                    "workbench.main.list_tasks_since",
+                    AsyncMock(
+                        return_value=[
+                            SimpleNamespace(id="recent-1"),
+                            SimpleNamespace(id="recent-2"),
+                        ]
+                    ),
                 ):
-                    with patch(
-                        "workbench.main.list_pipelines_since",
-                        AsyncMock(return_value=[SimpleNamespace(id="pipe-1")]),
-                    ):
+                    with patch("workbench.main.list_tasks", AsyncMock(return_value=([], 0))):
                         with patch(
-                            "workbench.main.task_row_to_info",
-                            side_effect=[linked_task, unrelated_task],
+                            "workbench.main.list_pipelines_since",
+                            AsyncMock(return_value=[SimpleNamespace(id="pipe-1")]),
                         ):
-                            result = await list_todo_coverage_route(recent_hours=72)
+                            row_to_task = {
+                                "recent-1": linked_task,
+                                "recent-2": unrelated_task,
+                            }
+
+                            def _task_row_to_info_side_effect(row):
+                                return row_to_task[row.id]
+
+                            with patch(
+                                "workbench.main.task_row_to_info",
+                                side_effect=_task_row_to_info_side_effect,
+                            ):
+                                result = await list_todo_coverage_route(recent_hours=72)
 
         assert isinstance(result, TodoCoverageListResponse)
         assert isinstance(result.summary, TodoCoverageSummary)
@@ -812,6 +863,56 @@ class TestTodoCoverageRoute:
 
         assert by_id["todo-unlinked"].needs_task is True
         assert by_id["todo-unlinked"].related_recent_task_count == 0
+
+    @pytest.mark.asyncio
+    async def test_includes_active_tasks_older_than_recent_cutoff(self):
+        session = AsyncMock()
+
+        linked_todo = _make_todo_row(
+            id="todo-linked",
+            title="Long-running rollout",
+            jira_key="PROJ-77",
+        )
+        very_old = datetime.now(UTC).replace(year=2024)
+        active_old_task = _make_task_info(
+            id="task-old-active",
+            source="Continue PROJ-77 migration",
+            status=TaskStatus.RUNNING,
+            repo="workbench",
+            created_at=very_old,
+        )
+
+        async def _list_tasks_side_effect(_session, *, status=None, limit=50, offset=0):
+            if status == "running":
+                return [SimpleNamespace(id="active-1")], 1
+            return [], 0
+
+        with patch("workbench.main.async_session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=session)
+            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with patch("workbench.main.list_todos", AsyncMock(return_value=[linked_todo])):
+                with patch("workbench.main.list_tasks_since", AsyncMock(return_value=[])):
+                    with patch(
+                        "workbench.main.list_tasks",
+                        AsyncMock(side_effect=_list_tasks_side_effect),
+                    ):
+                        with patch(
+                            "workbench.main.list_pipelines_since",
+                            AsyncMock(return_value=[]),
+                        ):
+                            with patch(
+                                "workbench.main.task_row_to_info",
+                                side_effect=[active_old_task],
+                            ):
+                                result = await list_todo_coverage_route(recent_hours=1)
+
+        by_id = {c.todo_id: c for c in result.coverages}
+        assert by_id["todo-linked"].needs_task is False
+        assert by_id["todo-linked"].related_active_task_count == 1
+        assert by_id["todo-linked"].related_recent_task_count == 0
+        assert result.summary.covered_todos == 1
+        assert result.summary.uncovered_todos == 0
 
     @pytest.mark.asyncio
     async def test_rejects_non_positive_recent_hours(self):

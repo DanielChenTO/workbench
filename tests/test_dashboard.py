@@ -559,7 +559,8 @@ class TestKanbanCoverageResilience:
     def test_coverage_timeout_guard_exists(self):
         """Coverage requests should time out rather than hanging board refresh."""
         script = _extract_script(DASHBOARD_HTML)
-        assert "Promise.race([" in script
+        assert "new AbortController()" in script
+        assert "abortController.abort()" in script
         assert "coverage request timed out" in script
 
     def test_degraded_coverage_label_exists(self):

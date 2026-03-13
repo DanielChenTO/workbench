@@ -1870,15 +1870,15 @@ async function kbFetchTodos() {
 
 async function kbFetchCoverageBestEffort() {
   const COVERAGE_TIMEOUT_MS = 4000;
+  const abortController = new AbortController();
+  const timeoutId = setTimeout(function() {
+    abortController.abort();
+  }, COVERAGE_TIMEOUT_MS);
   try {
-    const coverageResponse = await Promise.race([
-      apiFetch(API + '/todos/coverage?recent_hours=72'),
-      new Promise(function(_, reject) {
-        setTimeout(function() {
-          reject(new Error('coverage request timed out'));
-        }, COVERAGE_TIMEOUT_MS);
-      }),
-    ]);
+    const coverageResponse = await apiFetch(
+      API + '/todos/coverage?recent_hours=72',
+      { signal: abortController.signal }
+    );
     const coverageData = await coverageResponse.json();
     kbCoverageByTodoId = {};
     (coverageData.coverages || []).forEach(function(c) { kbCoverageByTodoId[c.todo_id] = c; });
@@ -1886,11 +1886,16 @@ async function kbFetchCoverageBestEffort() {
     kbCoverageLoadError = false;
     kbUpdateRefreshLabel();
   } catch (e) {
+    if (e && e.name === 'AbortError') {
+      e = new Error('coverage request timed out');
+    }
     kbCoverageByTodoId = {};
     kbCoverageSummary = null;
     kbCoverageLoadError = true;
     kbUpdateRefreshLabel();
     console.warn('Coverage unavailable; rendering todos without coverage details', e);
+  } finally {
+    clearTimeout(timeoutId);
   }
 }
 

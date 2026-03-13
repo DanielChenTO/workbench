@@ -697,27 +697,56 @@ def _extract_initiative_tags(todo: TodoInfo) -> list[str]:
     return result
 
 
+def _bounded_match(haystack: str, needle: str) -> bool:
+    if not needle:
+        return False
+    pattern = re.compile(rf"(?<![A-Za-z0-9]){re.escape(needle)}(?![A-Za-z0-9])")
+    return pattern.search(haystack) is not None
+
+
+def _repo_hint_candidates(repo_hints: list[str]) -> set[str]:
+    candidates: set[str] = set()
+    for hint in repo_hints:
+        value = hint.strip().lower()
+        if not value:
+            continue
+        candidates.add(value)
+        if "/" in value:
+            candidates.add(value.rsplit("/", 1)[-1])
+    return candidates
+
+
+def _initiative_value_is_specific(value: str) -> bool:
+    if not value:
+        return False
+    return any(ch.isdigit() for ch in value) or any(ch in value for ch in "-_/") or len(value) >= 8
+
+
 def _task_matches_todo(todo: TodoInfo, task: TaskInfo, repo_hints: list[str]) -> bool:
     source = task.input.source or ""
     summary = task.summary or ""
     haystack = "\n".join((source, summary)).lower()
 
-    if todo.jira_key and todo.jira_key.lower() in haystack:
+    jira_key = (todo.jira_key or "").strip().lower()
+    if jira_key and _bounded_match(haystack, jira_key):
         return True
 
-    if todo.source_ref:
-        source_ref = todo.source_ref.strip().lower()
-        if source_ref and source_ref in haystack:
+    source_ref = (todo.source_ref or "").strip().lower()
+    if source_ref and len(source_ref) >= 6 and _bounded_match(haystack, source_ref):
+        return True
+
+    task_repo = (task.input.repo or "").strip().lower()
+    if task_repo:
+        repo_candidates = _repo_hint_candidates(repo_hints)
+        if task_repo in repo_candidates:
             return True
 
     for tag in _extract_initiative_tags(todo):
-        value = tag.split(":", 1)[1].strip().lower() if ":" in tag else tag.lower()
-        if len(value) >= 3 and value in haystack:
+        tag_lower = tag.strip().lower()
+        if tag_lower and _bounded_match(haystack, tag_lower):
             return True
-
-    for hint in repo_hints:
-        hint_lower = hint.lower()
-        if hint_lower and hint_lower in haystack:
+        value = tag_lower.split(":", 1)[1].strip() if ":" in tag_lower else ""
+        if _initiative_value_is_specific(value) and _bounded_match(haystack, value):
             return True
 
     return False
@@ -747,11 +776,19 @@ async def list_todo_coverage_route(recent_hours: int = 72):
 
     async with async_session() as session:
         todo_rows = await list_todos(session, limit=1000)
-        task_rows = await list_tasks_since(session, since=cutoff)
+        recent_task_rows = await list_tasks_since(session, since=cutoff)
+        active_task_rows: list[TaskRow] = []
+        for status in sorted(_ACTIVE_TASK_STATUSES):
+            status_rows, _ = await list_tasks(session, status=status, limit=1000, offset=0)
+            active_task_rows.extend(status_rows)
         pipeline_rows = await list_pipelines_since(session, since=cutoff)
 
     todos = [todo_row_to_info(row) for row in todo_rows]
-    tasks = [task_row_to_info(row) for row in task_rows]
+    recent_tasks = [task_row_to_info(row) for row in recent_task_rows]
+    all_task_rows_by_id: dict[str, TaskRow] = {row.id: row for row in recent_task_rows}
+    for row in active_task_rows:
+        all_task_rows_by_id[row.id] = row
+    all_tasks = [task_row_to_info(row) for row in all_task_rows_by_id.values()]
     pipeline_ids = {p.id for p in pipeline_rows}
 
     coverages: list[TodoCoverageInfo] = []
@@ -761,21 +798,22 @@ async def list_todo_coverage_route(recent_hours: int = 72):
     for todo in todos:
         repo_hints = _extract_repo_hints(todo)
         initiative_tags = _extract_initiative_tags(todo)
-        related = [t for t in tasks if _task_matches_todo(todo, t, repo_hints)]
+        related_all = [t for t in all_tasks if _task_matches_todo(todo, t, repo_hints)]
+        related_recent = [t for t in recent_tasks if _task_matches_todo(todo, t, repo_hints)]
 
-        active_tasks = [t for t in related if t.status.value in _ACTIVE_TASK_STATUSES]
-        recent_tasks = sorted(related, key=lambda t: t.created_at, reverse=True)[:5]
+        active_tasks = [t for t in related_all if t.status.value in _ACTIVE_TASK_STATUSES]
+        recent_tasks_for_todo = sorted(related_recent, key=lambda t: t.created_at, reverse=True)[:5]
 
         related_pipeline_ids = sorted(
             {
                 t.pipeline_id
-                for t in related
+                for t in related_all
                 if t.pipeline_id
                 and (t.pipeline_id in pipeline_ids or t.status.value in _ACTIVE_TASK_STATUSES)
             }
         )
 
-        needs_task = len(related) == 0
+        needs_task = len(related_all) == 0
         if not needs_task:
             covered_todos += 1
         if active_tasks:
@@ -789,10 +827,10 @@ async def list_todo_coverage_route(recent_hours: int = 72):
                 initiative_tags=initiative_tags,
                 repo_hints=repo_hints,
                 related_active_task_count=len(active_tasks),
-                related_recent_task_count=len(related),
+                related_recent_task_count=len(related_recent),
                 related_pipeline_count=len(related_pipeline_ids),
                 active_tasks=[_to_coverage_task_ref(t) for t in active_tasks[:3]],
-                recent_tasks=[_to_coverage_task_ref(t) for t in recent_tasks],
+                recent_tasks=[_to_coverage_task_ref(t) for t in recent_tasks_for_todo],
                 related_pipeline_ids=related_pipeline_ids,
                 needs_task=needs_task,
             )
@@ -1119,21 +1157,21 @@ async def create_schedule_route(body: ScheduleCreate):
         )
 
     # Validate payload matches schedule_type
-    from .models import PipelineCreate as _PC
-    from .models import TaskCreate as _TC
+    from .models import PipelineCreate as PipelineCreateModel
+    from .models import TaskCreate as TaskCreateModel
 
     if body.schedule_type == "task":
         try:
-            _TC(**body.payload.model_dump()) if isinstance(body.payload, _TC) else _TC(
-                **body.payload.model_dump()
-            )
+            TaskCreateModel(**body.payload.model_dump()) if isinstance(
+                body.payload, TaskCreateModel
+            ) else TaskCreateModel(**body.payload.model_dump())
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid task payload: {e}")
     elif body.schedule_type == "pipeline":
         try:
-            _PC(**body.payload.model_dump()) if isinstance(body.payload, _PC) else _PC(
-                **body.payload.model_dump()
-            )
+            PipelineCreateModel(**body.payload.model_dump()) if isinstance(
+                body.payload, PipelineCreateModel
+            ) else PipelineCreateModel(**body.payload.model_dump())
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid pipeline payload: {e}")
 
@@ -1364,7 +1402,11 @@ async def morning_report(hours: int = 12):
     # Build overall summary text
     summary_lines = [f"Workbench report for the last {hours} hours:"]
     summary_lines.append(
-        f"  {len(recent_tasks)} tasks dispatched, {len(completed)} completed, {len(failed)} failed, {len(running)} still running"
+        "  "
+        f"{len(recent_tasks)} tasks dispatched, "
+        f"{len(completed)} completed, "
+        f"{len(failed)} failed, "
+        f"{len(running)} still running"
     )
     if prs:
         summary_lines.append(f"  {len(prs)} draft PRs created:")
@@ -1374,7 +1416,10 @@ async def morning_report(hours: int = 12):
         summary_lines.append(f"  {len(recent_pipelines)} pipelines:")
         for p in pipeline_summaries:
             summary_lines.append(
-                f"    - {p['id'][:12]} ({p['status']}): {p['stages_completed']}/{p['stages_total']} stages, {p['review_iterations']} review loops"
+                "    "
+                f"- {p['id'][:12]} ({p['status']}): "
+                f"{p['stages_completed']}/{p['stages_total']} stages, "
+                f"{p['review_iterations']} review loops"
             )
     if failed:
         summary_lines.append(f"  {len(failed)} failures:")
