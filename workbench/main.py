@@ -72,6 +72,7 @@ from .models import (
     todo_row_to_info,
 )
 from .worker import WorkerPool
+from .workspace_setup import TOOL_FILES, install_workspace
 
 log = logging.getLogger(__name__)
 
@@ -394,6 +395,7 @@ async def create_task_route(body: TaskCreate):
             except ValueError as e:
                 # Roll back: delete the just-created task
                 from sqlalchemy import delete as sa_delete
+
                 from .database import TaskRow
 
                 await session.execute(sa_delete(TaskRow).where(TaskRow.id == row.id))
@@ -759,6 +761,7 @@ async def reorder_todo_route(todo_id: str, body: TodoReorder):
 def _pipeline_row_to_info(row) -> PipelineInfo:
     """Convert a PipelineRow to a PipelineInfo API response."""
     import json as _json
+
     from .models import StageConfig
 
     stages = [StageConfig(**s) for s in _json.loads(row.stages_json)]
@@ -835,6 +838,7 @@ async def create_pipeline_route(body: PipelineCreate):
             except ValueError as e:
                 # Roll back: delete the just-created pipeline
                 from sqlalchemy import delete as sa_delete
+
                 from .database import PipelineRow
 
                 await session.execute(sa_delete(PipelineRow).where(PipelineRow.id == row.id))
@@ -1385,10 +1389,10 @@ def cli():
     # --- mcp (run MCP server in stdio mode) ---
     subparsers.add_parser("mcp", help="Run workbench MCP server (stdio mode)")
 
-    # --- init-workspace (install OpenCode tools into a target workspace) ---
+    # --- init-workspace (install workbench integration into a target workspace) ---
     init_parser = subparsers.add_parser(
         "init-workspace",
-        help="Install workbench OpenCode tools into a workspace",
+        help="Install workbench OpenCode integration into a workspace",
     )
     init_parser.add_argument(
         "target",
@@ -1440,52 +1444,42 @@ def _run_mcp_server() -> None:
 def _init_workspace(args) -> None:
     """Handle `workbench init-workspace [target]`.
 
-    Copies the canonical OpenCode tool files (dispatch-task.ts, check-task.ts)
-    into the target workspace's .opencode/tools/ directory.  Also ensures
-    package.json has the @opencode-ai/plugin dependency.
+    Installs the canonical OpenCode integration into the target workspace,
+    including tool files, helper scripts, and required OpenCode config.
     """
-    import json
-    import shutil
-
     target = Path(args.target).resolve()
-    tools_dir = target / ".opencode" / "tools"
-    tools_dir.mkdir(parents=True, exist_ok=True)
-
-    # Locate the canonical tool files shipped with this package
-    pkg_tools = Path(__file__).resolve().parent.parent / "opencode-tools"
+    workbench_repo = Path(__file__).resolve().parent.parent
+    pkg_tools = workbench_repo / "opencode-tools"
     if not pkg_tools.is_dir():
         print(f"Error: cannot find opencode-tools/ at {pkg_tools}", file=sys.stderr)
         sys.exit(1)
 
-    tool_files = ["dispatch-task.ts", "check-task.ts"]
-    for fname in tool_files:
-        src = pkg_tools / fname
-        dst = tools_dir / fname
-        if not src.is_file():
-            print(f"Warning: {src} not found, skipping", file=sys.stderr)
-            continue
-        shutil.copy2(src, dst)
-        print(f"  Installed {dst}")
+    result = install_workspace(
+        workspace_root=target,
+        workbench_repo=workbench_repo,
+        package_tools_dir=pkg_tools,
+    )
 
-    # Ensure .opencode/package.json has the plugin dependency
-    pkg_json_path = target / ".opencode" / "package.json"
-    plugin_dep = "@opencode-ai/plugin"
-    plugin_version = "^1.2.15"
-
-    if pkg_json_path.is_file():
-        pkg_data = json.loads(pkg_json_path.read_text(encoding="utf-8"))
-    else:
-        pkg_data = {"private": True, "dependencies": {}}
-
-    deps = pkg_data.setdefault("dependencies", {})
-    if plugin_dep not in deps:
-        deps[plugin_dep] = plugin_version
-        pkg_json_path.write_text(json.dumps(pkg_data, indent=2) + "\n", encoding="utf-8")
-        print(f"  Added {plugin_dep} to {pkg_json_path}")
-    else:
-        print(f"  {plugin_dep} already in {pkg_json_path}")
-
-    print(f"\nWorkbench tools installed into {tools_dir}")
+    print(f"Workspace prepared: {target}")
+    print("Installed tools:")
+    for name in TOOL_FILES:
+        path = result.tools_dir / name
+        if path.exists():
+            print(f"  - {path}")
+    print(f"Updated OpenCode package: {result.package_json_path}")
+    print(f"Updated OpenCode config:   {result.opencode_json_path}")
+    print(f"Workbench env file:       {result.env_path}")
+    print(f"Serve helper:             {result.serve_script_path}")
+    print(f"MCP helper:               {result.mcp_script_path}")
+    print("")
+    print("Next steps:")
+    print("  1. Ensure workbench itself is installed and migrated on this machine")
+    print(f"  2. Start workbench: {result.serve_script_path}")
+    print(
+        f"  3. If needed, install .opencode dependencies: cd {target / '.opencode'} && npm install"
+    )
+    print("  4. Open a new OpenCode session in the workspace")
+    print("  5. MCP integration is enabled in opencode.json")
     print("Set WORKBENCH_URL if the service is not at http://127.0.0.1:8420")
 
 

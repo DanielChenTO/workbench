@@ -48,6 +48,12 @@ def test_install_workspace_writes_tools_and_scripts(tmp_path: Path):
     assert (workspace / "work-directory" / "references" / "INDEX.md").exists()
 
 
+def test_tool_files_include_required_discoverability_tools():
+    assert "dispatch-code-change.ts" in TOOL_FILES
+    assert "dispatch-pipeline.ts" in TOOL_FILES
+    assert "dispatch-task.ts" in TOOL_FILES
+
+
 def test_install_workspace_preserves_existing_opencode_json(tmp_path: Path):
     workspace = tmp_path / "workspace"
     workbench_repo = tmp_path / "workbench-repo"

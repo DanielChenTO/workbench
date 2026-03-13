@@ -63,6 +63,16 @@ The API server starts at `http://127.0.0.1:8420`. Open the dashboard at [http://
 
 ## Usage
 
+### Workspace setup surfaces
+
+Workbench provides three setup paths that install the same canonical OpenCode tool set:
+
+- `workbench init-workspace [target]`
+- `python scripts/setup-opencode-workspace.py <workspace>`
+- `python scripts/bootstrap-opencode-machine.py --workspace /path/to/workspace`
+
+All three paths install the shared tool list from `workbench.workspace_setup.TOOL_FILES`, including `dispatch-code-change.ts`.
+
 ### Submit a task via CLI
 
 ```bash
