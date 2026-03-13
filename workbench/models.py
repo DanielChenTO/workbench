@@ -297,7 +297,9 @@ class PipelineCreate(BaseModel):
 
     repo: str | None = Field(
         default=None,
-        description="Target repository for all stages (can be overridden per-stage via extra_instructions).",
+        description=(
+            "Target repository for all stages (can be overridden per-stage via extra_instructions)."
+        ),
     )
     stages: list[StageConfig] = Field(
         min_length=1,
@@ -334,6 +336,8 @@ class PipelineInfo(BaseModel):
     task_ids: list[str] = Field(default_factory=list)
     depends_on: list[str] = Field(default_factory=list)
     dependencies_met: bool = True
+    stalled: bool = False
+    stalled_reason: str | None = None
     error: str | None = None
     created_at: datetime
     completed_at: datetime | None = None
@@ -370,7 +374,9 @@ class ScheduleCreate(BaseModel):
         description="IANA timezone for the cron expression (e.g. 'US/Pacific', 'UTC').",
     )
     schedule_type: ScheduleType = Field(
-        description="What to dispatch: 'task' for a single task, 'pipeline' for a multi-stage pipeline.",
+        description=(
+            "What to dispatch: 'task' for a single task, 'pipeline' for a multi-stage pipeline."
+        ),
     )
     payload: TaskCreate | PipelineCreate = Field(
         description=(

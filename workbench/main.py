@@ -21,6 +21,7 @@ from .database import (
     TaskRow,
     async_session,
     check_db,
+    check_pipeline_dependencies_met,
     close_db,
     count_todos,
     create_pipeline,
@@ -1185,7 +1186,13 @@ async def reorder_todo_route(todo_id: str, body: TodoReorder):
 # ---------------------------------------------------------------------------
 
 
-def _pipeline_row_to_info(row) -> PipelineInfo:
+def _pipeline_row_to_info(
+    row,
+    *,
+    dependencies_met: bool = True,
+    stalled: bool = False,
+    stalled_reason: str | None = None,
+) -> PipelineInfo:
     """Convert a PipelineRow to a PipelineInfo API response."""
     import json as _json
 
@@ -1215,11 +1222,48 @@ def _pipeline_row_to_info(row) -> PipelineInfo:
         model=row.model,
         task_ids=task_ids,
         depends_on=depends_on,
-        dependencies_met=getattr(row, "_dependencies_met", True),
+        dependencies_met=dependencies_met,
+        stalled=stalled,
+        stalled_reason=stalled_reason,
         error=row.error,
         created_at=row.created_at,
         completed_at=row.completed_at,
     )
+
+
+async def _compute_pipeline_health(session, row: PipelineRow) -> tuple[bool, bool, str | None]:
+    """Compute dependency and stall signals for operator triage.
+
+    Stalled means pipeline state appears internally inconsistent and likely
+    needs operator intervention (or a manual restart).
+    """
+    dependencies_met = True
+    dependencies_reason: str | None = None
+
+    if row.depends_on_json:
+        dependencies_met, dependencies_reason = await check_pipeline_dependencies_met(
+            session,
+            row.id,
+        )
+
+    status = str(row.status)
+    stalled = False
+    stalled_reason: str | None = None
+
+    if status == "pending" and row.current_task_id is None:
+        if dependencies_met:
+            stalled = True
+            stalled_reason = "pending_without_current_task_id"
+        elif dependencies_reason:
+            stalled = True
+            stalled_reason = f"dependency_resolution_error: {dependencies_reason}"
+        else:
+            stalled_reason = "waiting_on_dependencies"
+    elif status == "running" and row.current_task_id is None:
+        stalled = True
+        stalled_reason = "running_without_current_task_id"
+
+    return dependencies_met, stalled, stalled_reason
 
 
 @app.post("/pipelines", response_model=PipelineInfo, status_code=201)
@@ -1280,8 +1324,14 @@ async def create_pipeline_route(body: PipelineCreate):
     # Refresh to get updated state after start
     async with async_session() as session:
         row = await get_pipeline(session, row.id)
+        dependencies_met, stalled, stalled_reason = await _compute_pipeline_health(session, row)
 
-    return _pipeline_row_to_info(row)
+    return _pipeline_row_to_info(
+        row,
+        dependencies_met=dependencies_met,
+        stalled=stalled,
+        stalled_reason=stalled_reason,
+    )
 
 
 @app.get("/pipelines", response_model=PipelineListResponse)
@@ -1294,8 +1344,20 @@ async def list_pipelines_route(
     async with async_session() as session:
         rows, total = await list_pipelines(session, status=status, limit=limit, offset=offset)
 
+        infos: list[PipelineInfo] = []
+        for row in rows:
+            dependencies_met, stalled, stalled_reason = await _compute_pipeline_health(session, row)
+            infos.append(
+                _pipeline_row_to_info(
+                    row,
+                    dependencies_met=dependencies_met,
+                    stalled=stalled,
+                    stalled_reason=stalled_reason,
+                )
+            )
+
     return PipelineListResponse(
-        pipelines=[_pipeline_row_to_info(r) for r in rows],
+        pipelines=infos,
         total=total,
     )
 
@@ -1305,9 +1367,15 @@ async def get_pipeline_route(pipeline_id: str):
     """Get details for a specific pipeline."""
     async with async_session() as session:
         row = await get_pipeline(session, pipeline_id)
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} not found")
-    return _pipeline_row_to_info(row)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"Pipeline {pipeline_id} not found")
+        dependencies_met, stalled, stalled_reason = await _compute_pipeline_health(session, row)
+    return _pipeline_row_to_info(
+        row,
+        dependencies_met=dependencies_met,
+        stalled=stalled,
+        stalled_reason=stalled_reason,
+    )
 
 
 @app.post("/pipelines/{pipeline_id}/cancel")
