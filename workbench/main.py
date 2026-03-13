@@ -56,6 +56,9 @@ from .models import (
     PipelineInfo,
     PipelineListResponse,
     PipelineStatus,
+    ReviewInboxCounts,
+    ReviewInboxItem,
+    ReviewInboxResponse,
     ScheduleCreate,
     ScheduleInfo,
     ScheduleListResponse,
@@ -778,6 +781,221 @@ def _normalize_runtime_validation_key(todo: TodoInfo) -> str | None:
     if not normalized:
         normalized = (todo.jira_key or todo.source_ref or todo.id).lower()
     return normalized
+
+
+def _extract_markdown_section(text: str | None, heading: str) -> str | None:
+    if not text:
+        return None
+    pattern = re.compile(
+        rf"^##\s+{re.escape(heading)}\s*$\n(.*?)(?=^##\s+|\Z)",
+        re.IGNORECASE | re.MULTILINE | re.DOTALL,
+    )
+    match = pattern.search(text)
+    if not match:
+        return None
+    content = match.group(1).strip()
+    return content or None
+
+
+def _compact_one_line(text: str | None, max_len: int = 220) -> str | None:
+    if not text:
+        return None
+    compact = " ".join(text.split())
+    if len(compact) <= max_len:
+        return compact
+    return compact[: max_len - 3].rstrip() + "..."
+
+
+def _task_recommendation(task: TaskInfo) -> tuple[str, str]:
+    if task.status.value == "blocked":
+        return "Needs operator input", "Respond via task unblock flow"
+    if task.status.value == "stuck":
+        return "Execution appears stale", "Inspect logs and retry/cancel"
+    if task.status.value == "failed":
+        return "Execution failed", "Review error and decide rerun scope"
+    return "Review suggested", "Inspect task details"
+
+
+@app.get("/review-inbox", response_model=ReviewInboxResponse)
+async def review_inbox_route(recent_hours: int = 72):
+    """Return review-focused items that currently need human judgment."""
+    from datetime import timedelta
+
+    if recent_hours <= 0:
+        raise HTTPException(status_code=400, detail="recent_hours must be > 0")
+
+    cutoff = datetime.now(UTC) - timedelta(hours=recent_hours)
+
+    async with async_session() as session:
+        todo_rows = await list_todos(session, limit=1000)
+        recent_task_rows = await list_tasks_since(session, since=cutoff)
+        active_task_rows: list[TaskRow] = []
+        for status in sorted(_ACTIVE_TASK_STATUSES):
+            status_rows, _ = await list_tasks(session, status=status, limit=1000, offset=0)
+            active_task_rows.extend(status_rows)
+        failed_rows, _ = await list_tasks(session, status="failed", limit=1000, offset=0)
+        pipeline_rows, _ = await list_pipelines(session, limit=2000, offset=0)
+
+    todos = [todo_row_to_info(row) for row in todo_rows]
+    all_task_rows_by_id: dict[str, TaskRow] = {row.id: row for row in recent_task_rows}
+    for row in active_task_rows + failed_rows:
+        all_task_rows_by_id[row.id] = row
+    all_tasks = [task_row_to_info(row) for row in all_task_rows_by_id.values()]
+    task_by_id = {task.id: task for task in all_tasks}
+
+    items: list[ReviewInboxItem] = []
+
+    for task in all_tasks:
+        if task.status.value not in {"blocked", "stuck", "failed"}:
+            continue
+        why, recommendation = _task_recommendation(task)
+        evidence = _compact_one_line(
+            _extract_markdown_section(task.output, "Evidence")
+            or task.summary
+            or task.error
+            or task.blocked_reason
+        )
+        items.append(
+            ReviewInboxItem(
+                id=f"task:{task.id}",
+                kind="task",
+                title=f"Task {task.id[:12]} requires review",
+                why=why,
+                recommendation=recommendation,
+                status=task.status.value,
+                summary=_compact_one_line(task.summary),
+                evidence_summary=evidence,
+                blocking_reason=_compact_one_line(task.blocked_reason or task.error),
+                repo=task.input.repo,
+                task_id=task.id,
+                pipeline_id=task.pipeline_id,
+                branch=task.branch,
+                stage_name=task.stage_name,
+                created_at=task.created_at,
+                updated_at=task.completed_at or task.last_heartbeat or task.created_at,
+            )
+        )
+
+    for row in pipeline_rows:
+        pipeline = _pipeline_row_to_info(row)
+        if pipeline.status.value not in {"failed", "cancelled"}:
+            continue
+        current_task = task_by_id.get(pipeline.current_task_id or "")
+        evidence = _compact_one_line(
+            _extract_markdown_section(current_task.output if current_task else None, "Evidence")
+            if current_task
+            else None
+        )
+        why = "Pipeline ended without successful completion"
+        if pipeline.review_iteration > 0:
+            why = (
+                f"Pipeline exhausted review loop ({pipeline.review_iteration}/"
+                f"{pipeline.max_review_iterations})"
+            )
+        items.append(
+            ReviewInboxItem(
+                id=f"pipeline:{pipeline.id}",
+                kind="pipeline",
+                title=f"Pipeline {pipeline.id[:12]} requires decision",
+                why=why,
+                recommendation="Inspect pipeline stages and decide rerun or manual follow-up",
+                status=pipeline.status.value,
+                summary=_compact_one_line(pipeline.error),
+                evidence_summary=evidence,
+                blocking_reason=_compact_one_line(pipeline.error),
+                repo=pipeline.repo,
+                task_id=pipeline.current_task_id,
+                pipeline_id=pipeline.id,
+                branch=current_task.branch if current_task else None,
+                stage_name=current_task.stage_name if current_task else None,
+                created_at=pipeline.created_at,
+                updated_at=pipeline.completed_at or pipeline.created_at,
+            )
+        )
+
+    for todo in todos:
+        if todo.status != "review":
+            continue
+        repo_hints = _extract_repo_hints(todo)
+        related_tasks = [t for t in all_tasks if _task_matches_todo(todo, t, repo_hints)]
+        active_related = [t for t in related_tasks if t.status.value in _ACTIVE_TASK_STATUSES]
+        recent_related = sorted(related_tasks, key=lambda t: t.created_at, reverse=True)
+        primary_task = recent_related[0] if recent_related else None
+        why = "Todo is awaiting operator review"
+        recommendation = "Decide next owner/action and move todo state"
+        if primary_task and primary_task.status.value in {"blocked", "stuck", "failed"}:
+            why = f"Linked {primary_task.status.value} task needs judgment"
+            recommendation = "Review linked task details and unblock/retry/re-scope"
+        elif not active_related and not recent_related:
+            why = "Todo is in review without linked execution"
+            recommendation = "Decide whether to dispatch work or close todo"
+
+        evidence_parts: list[str] = []
+        if primary_task and primary_task.summary:
+            evidence_parts.append(primary_task.summary)
+        if primary_task and primary_task.output:
+            sec = _extract_markdown_section(primary_task.output, "Evidence")
+            if sec:
+                evidence_parts.append(sec)
+        evidence_summary = _compact_one_line(" | ".join(evidence_parts) if evidence_parts else None)
+
+        items.append(
+            ReviewInboxItem(
+                id=f"todo:{todo.id}",
+                kind="todo",
+                title=f"Todo {todo.title}",
+                why=why,
+                recommendation=recommendation,
+                status=todo.status,
+                summary=_compact_one_line(todo.description or todo.title),
+                evidence_summary=evidence_summary,
+                blocking_reason=(
+                    _compact_one_line(primary_task.blocked_reason or primary_task.error)
+                    if primary_task
+                    else None
+                ),
+                repo=primary_task.input.repo
+                if primary_task
+                else (repo_hints[0] if repo_hints else None),
+                todo_id=todo.id,
+                task_id=primary_task.id if primary_task else None,
+                pipeline_id=primary_task.pipeline_id if primary_task else None,
+                branch=primary_task.branch if primary_task else None,
+                stage_name=primary_task.stage_name if primary_task else None,
+                created_at=todo.created_at,
+                updated_at=todo.updated_at,
+            )
+        )
+
+    items.sort(
+        key=lambda item: item.updated_at or item.created_at or datetime.now(UTC),
+        reverse=True,
+    )
+    items.sort(
+        key=lambda item: (
+            0
+            if item.kind == "task" and item.status == "blocked"
+            else 1
+            if item.kind == "task"
+            else 2
+            if item.kind == "pipeline"
+            else 3
+        )
+    )
+
+    counts = ReviewInboxCounts(
+        total=len(items),
+        blocked_tasks=sum(1 for i in items if i.kind == "task" and i.status == "blocked"),
+        failed_tasks=sum(1 for i in items if i.kind == "task" and i.status == "failed"),
+        failed_pipelines=sum(1 for i in items if i.kind == "pipeline"),
+        todo_review_items=sum(1 for i in items if i.kind == "todo"),
+    )
+
+    return ReviewInboxResponse(
+        generated_at=datetime.now(UTC),
+        counts=counts,
+        items=items,
+    )
 
 
 def _merge_tags(existing: list[str] | None, new_tag: str) -> list[str]:

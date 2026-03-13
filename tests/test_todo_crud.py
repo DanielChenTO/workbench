@@ -20,15 +20,18 @@ from workbench.database import (
     update_todo,
 )
 from workbench.main import (
+    _extract_markdown_section,
     _extract_repo_hints,
     _task_matches_todo,
     list_todo_coverage_route,
     reconcile_todos_route,
     reorder_todo_route,
+    review_inbox_route,
     update_todo_route,
 )
 from workbench.models import (
     Autonomy,
+    ReviewInboxResponse,
     TaskCreate,
     TaskInfo,
     TaskInputType,
@@ -713,6 +716,14 @@ def _make_task_info(
 
 
 class TestTodoCoverageHelpers:
+    def test_extract_markdown_section(self):
+        text = (
+            """## Outcome\nDone\n\n## Evidence\n- test A\n- test B\n\n## Risks / Unknowns\nnone"""
+        )
+        evidence = _extract_markdown_section(text, "Evidence")
+        assert evidence is not None
+        assert "test A" in evidence
+
     def test_extract_repo_hints_prefers_existing_metadata(self):
         now = datetime.now(UTC)
         todo = TodoInfo(
@@ -1014,3 +1025,117 @@ class TestTodoReconcileRoute:
         assert len(result.auto_fixed) >= 1
         assert any(item.issue == "stale_in_progress_no_running_task" for item in result.auto_fixed)
         assert mock_update.await_count >= 1
+
+
+class TestReviewInboxRoute:
+    @pytest.mark.asyncio
+    async def test_returns_task_pipeline_todo_review_items(self):
+        session = AsyncMock()
+
+        todo = _make_todo_row(
+            id="todo-review",
+            title="Operator review",
+            status="review",
+            jira_key="PROJ-77",
+            updated_at=datetime.now(UTC),
+        )
+
+        blocked_task = _make_task_info(
+            id="task-blocked",
+            source="Continue PROJ-77 migration",
+            status=TaskStatus.BLOCKED,
+            repo="workbench",
+            summary="Needs clarification",
+            pipeline_id="pipe-failed",
+            stage_name="implement",
+        )
+        blocked_task.blocked_reason = "Awaiting operator decision"
+
+        failed_task = _make_task_info(
+            id="task-failed",
+            source="Run tests",
+            status=TaskStatus.FAILED,
+            repo="workbench",
+            summary="Tests failed",
+        )
+        failed_task.error = "pytest exited 1"
+
+        failed_pipeline_row = SimpleNamespace(
+            id="pipe-failed",
+            repo="workbench",
+            stages_json=json.dumps(
+                [
+                    {
+                        "name": "implement",
+                        "autonomy": "local",
+                        "prompt": "do work",
+                        "review_gate": False,
+                    },
+                    {
+                        "name": "review",
+                        "autonomy": "research",
+                        "prompt": "review",
+                        "review_gate": True,
+                    },
+                ]
+            ),
+            current_stage_index=1,
+            current_task_id="task-blocked",
+            status="failed",
+            max_review_iterations=2,
+            review_iteration=2,
+            model=None,
+            task_ids_json=json.dumps(["task-blocked"]),
+            depends_on_json=None,
+            error="Review rejected 2 times",
+            created_at=datetime.now(UTC),
+            completed_at=datetime.now(UTC),
+        )
+
+        with patch("workbench.main.async_session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=session)
+            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with patch("workbench.main.list_todos", AsyncMock(return_value=[todo])):
+                with patch(
+                    "workbench.main.list_tasks_since",
+                    AsyncMock(
+                        return_value=[
+                            SimpleNamespace(id="row-blocked"),
+                            SimpleNamespace(id="row-failed"),
+                        ]
+                    ),
+                ):
+                    with patch(
+                        "workbench.main.list_tasks",
+                        AsyncMock(return_value=([], 0)),
+                    ):
+                        with patch(
+                            "workbench.main.list_pipelines",
+                            AsyncMock(return_value=([failed_pipeline_row], 1)),
+                        ):
+                            with patch(
+                                "workbench.main.task_row_to_info",
+                                side_effect=[blocked_task, failed_task],
+                            ):
+                                result = await review_inbox_route(recent_hours=72)
+
+        assert isinstance(result, ReviewInboxResponse)
+        assert result.counts.total >= 3
+        assert result.counts.blocked_tasks >= 1
+        assert result.counts.failed_tasks >= 1
+        assert result.counts.failed_pipelines >= 1
+        assert result.counts.todo_review_items >= 1
+
+        kinds = {item.kind for item in result.items}
+        assert "task" in kinds
+        assert "pipeline" in kinds
+        assert "todo" in kinds
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_positive_recent_hours(self):
+        with pytest.raises(HTTPException) as exc:
+            await review_inbox_route(recent_hours=0)
+
+        assert exc.value.status_code == 400
+        assert "recent_hours" in exc.value.detail

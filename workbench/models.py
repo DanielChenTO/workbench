@@ -544,6 +544,46 @@ class TodoCoverageListResponse(BaseModel):
     summary: TodoCoverageSummary
 
 
+class ReviewInboxItem(BaseModel):
+    """Single reviewable unit shown in the dashboard review inbox."""
+
+    id: str
+    kind: str
+    title: str
+    why: str
+    recommendation: str
+    status: str
+    summary: str | None = None
+    evidence_summary: str | None = None
+    blocking_reason: str | None = None
+    repo: str | None = None
+    todo_id: str | None = None
+    task_id: str | None = None
+    pipeline_id: str | None = None
+    branch: str | None = None
+    stage_name: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ReviewInboxCounts(BaseModel):
+    """Top-line counters for review inbox categories."""
+
+    total: int = 0
+    blocked_tasks: int = 0
+    failed_tasks: int = 0
+    failed_pipelines: int = 0
+    todo_review_items: int = 0
+
+
+class ReviewInboxResponse(BaseModel):
+    """Response payload returned by GET /review-inbox."""
+
+    generated_at: datetime
+    counts: ReviewInboxCounts
+    items: list[ReviewInboxItem]
+
+
 class TodoReconcileRequest(BaseModel):
     """Request body for POST /todos/reconcile."""
 

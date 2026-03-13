@@ -345,6 +345,37 @@ DASHBOARD_HTML = """\
   }
   .report-failure .error-text { color: var(--red); font-size: 11px; margin-top: 2px; }
 
+  /* Review inbox */
+  .review-header {
+    display: flex; gap: 12px; align-items: center; margin-bottom: 14px; flex-wrap: wrap;
+  }
+  .review-counts { display: flex; gap: 10px; flex-wrap: wrap; }
+  .review-count {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 8px 12px; min-width: 100px;
+  }
+  .review-count .num { font-size: 20px; font-weight: 700; }
+  .review-count .label { font-size: 10px; text-transform: uppercase; color: var(--muted); }
+  .review-count.blocked .num { color: var(--yellow); }
+  .review-count.failed .num { color: var(--red); }
+  .review-count.todo .num { color: var(--accent); }
+  .review-item {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; margin-bottom: 10px;
+  }
+  .review-item-header {
+    display: flex; gap: 8px; align-items: center; justify-content: space-between; margin-bottom: 8px;
+  }
+  .review-title { font-size: 13px; font-weight: 700; }
+  .review-why { color: var(--text); margin-bottom: 6px; }
+  .review-line { color: var(--muted); font-size: 12px; margin-bottom: 4px; }
+  .review-links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  .review-link {
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px 8px;
+    background: var(--bg); font-size: 11px;
+  }
+  .review-link .task-id, .review-link .pipeline-id { font-size: 11px; }
+
   /* ===== Kanban Board (embedded tab) ===== */
   #tab-board.active {
     display: flex; flex-direction: column; height: calc(100vh - 200px); overflow: hidden;
@@ -603,7 +634,7 @@ DASHBOARD_HTML = """\
     </select>
   </div>
   <span class="refresh-indicator" id="refreshInd">&#x25cf; auto-refresh</span>
-  <span style="font-size:10px;color:var(--muted);margin-left:8px" title="n=new task, /=search, 1-5=tabs, r=refresh, Esc=close">&#x2328; keys</span>
+  <span style="font-size:10px;color:var(--muted);margin-left:8px" title="n=new task, /=search, 1-6=tabs, r=refresh, Esc=close">&#x2328; keys</span>
 </div>
 
 <div class="dispatch-panel" id="dispatchPanel">
@@ -641,6 +672,7 @@ DASHBOARD_HTML = """\
   <button onclick="switchTab('tasks')">Tasks</button>
   <button onclick="switchTab('pipelines')">Pipelines</button>
   <button onclick="switchTab('schedules')">Schedules</button>
+  <button onclick="switchTab('review')">Review Inbox</button>
   <button onclick="switchTab('report')">Morning Report</button>
 </div>
 
@@ -752,6 +784,24 @@ DASHBOARD_HTML = """\
   </div>
 </div>
 
+<div class="tab-content" id="tab-review">
+  <div class="review-header">
+    <div class="filter-group">
+      <label>Window:</label>
+      <select id="reviewHours" onchange="fetchReviewInbox()">
+        <option value="24">Last 24 hours</option>
+        <option value="48">Last 48 hours</option>
+        <option value="72" selected>Last 72 hours</option>
+      </select>
+    </div>
+    <button class="secondary" onclick="fetchReviewInbox()" style="background:var(--surface);border:1px solid var(--border);color:var(--text);padding:6px 14px;border-radius:6px;cursor:pointer;font-family:inherit;font-size:12px">Refresh Inbox</button>
+    <div class="review-counts" id="reviewCounts"></div>
+  </div>
+  <div id="reviewContent">
+    <div class="empty-state"><p>Loading review inbox...</p></div>
+  </div>
+</div>
+
 <div class="tab-content" id="tab-report">
   <div style="display:flex;gap:12px;align-items:center;margin-bottom:16px">
     <div class="filter-group">
@@ -790,6 +840,7 @@ let timer = null;
 let tasks = [];
 let repos = [];
 let pipelines = [];
+let reviewInbox = { counts: null, items: [] };
 let activeTab = 'board';
 let searchQuery = '';
 
@@ -976,6 +1027,7 @@ function switchTab(tab) {
   // Auto-fetch data when switching to specific tabs
   if (tab === 'board') kbFetchTodos();
   if (tab === 'report') fetchReport();
+  if (tab === 'review') fetchReviewInbox();
   if (tab === 'schedules') fetchSchedules();
 }
 
@@ -1671,6 +1723,66 @@ async function deleteSchedule(id, name) {
 }
 
 // --- Morning Report ---
+async function fetchReviewInbox() {
+  var hours = document.getElementById('reviewHours').value;
+  var content = document.getElementById('reviewContent');
+  content.innerHTML = '<div class="empty-state"><p>Loading review inbox...</p></div>';
+  try {
+    var r = await apiFetch(API + '/review-inbox?recent_hours=' + hours);
+    var d = await r.json();
+    reviewInbox = d || { counts: null, items: [] };
+    renderReviewInbox();
+  } catch (e) {
+    handleFetchError(e, 'Failed to load review inbox');
+    content.innerHTML = '<div class="empty-state"><p>Failed to load review inbox</p><span>' + escHtml(e.message) + '</span></div>';
+  }
+}
+
+function renderReviewInbox() {
+  var content = document.getElementById('reviewContent');
+  var countsEl = document.getElementById('reviewCounts');
+  var counts = reviewInbox.counts || { total: 0, blocked_tasks: 0, failed_tasks: 0, failed_pipelines: 0, todo_review_items: 0 };
+  var items = reviewInbox.items || [];
+
+  countsEl.innerHTML =
+    '<div class="review-count"><div class="num">' + counts.total + '</div><div class="label">Total</div></div>' +
+    '<div class="review-count blocked"><div class="num">' + counts.blocked_tasks + '</div><div class="label">Blocked</div></div>' +
+    '<div class="review-count failed"><div class="num">' + counts.failed_tasks + '</div><div class="label">Failed Tasks</div></div>' +
+    '<div class="review-count failed"><div class="num">' + counts.failed_pipelines + '</div><div class="label">Failed Pipelines</div></div>' +
+    '<div class="review-count todo"><div class="num">' + counts.todo_review_items + '</div><div class="label">Review Todos</div></div>';
+
+  if (items.length === 0) {
+    content.innerHTML = '<div class="empty-state"><p>No review items right now</p><span>New blocked/failed work will appear here.</span></div>';
+    return;
+  }
+
+  content.innerHTML = items.map(function(item) {
+    return '<div class="review-item">' +
+      '<div class="review-item-header">' +
+        '<div class="review-title">' + escHtml(item.title || item.id) + '</div>' +
+        '<span class="badge badge-' + escHtml(item.status || 'queued') + '">' + escHtml(item.status || 'unknown') + '</span>' +
+      '</div>' +
+      '<div class="review-why">' + escHtml(item.why || '') + '</div>' +
+      '<div class="review-line"><strong>Recommendation:</strong> ' + escHtml(item.recommendation || '') + '</div>' +
+      (item.summary ? '<div class="review-line"><strong>Summary:</strong> ' + escHtml(item.summary) + '</div>' : '') +
+      (item.evidence_summary ? '<div class="review-line"><strong>Evidence:</strong> ' + escHtml(item.evidence_summary) + '</div>' : '') +
+      (item.blocking_reason ? '<div class="review-line"><strong>Blocking reason:</strong> ' + escHtml(item.blocking_reason) + '</div>' : '') +
+      '<div class="review-line"><strong>Context:</strong> ' +
+        (item.repo ? 'repo ' + escHtml(item.repo) + ' \u00b7 ' : '') +
+        (item.branch ? 'branch ' + escHtml(item.branch) + ' \u00b7 ' : '') +
+        (item.stage_name ? 'stage ' + escHtml(item.stage_name) + ' \u00b7 ' : '') +
+        'kind ' + escHtml(item.kind || 'unknown') +
+      '</div>' +
+      '<div class="review-links">' +
+        (item.todo_id ? '<span class="review-link">todo <span class="task-id" onclick="switchTab(\\'board\\'); kbOpenDetail(\\'' + item.todo_id + '\\')">' + item.todo_id.slice(0,12) + '</span></span>' : '') +
+        (item.task_id ? '<span class="review-link">task <span class="task-id" onclick="switchTab(\\'tasks\\'); setTimeout(function(){ showDetail(\\'' + item.task_id + '\\'); }, 50)">' + item.task_id.slice(0,12) + '</span></span>' : '') +
+        (item.pipeline_id ? '<span class="review-link">pipeline <span class="pipeline-id" onclick="switchTab(\\'pipelines\\'); setTimeout(function(){ showPipelineDetail(\\'' + item.pipeline_id + '\\'); }, 50)">' + item.pipeline_id.slice(0,12) + '</span></span>' : '') +
+      '</div>' +
+    '</div>';
+  }).join('');
+}
+
+// --- Morning Report ---
 async function fetchReport() {
   const hours = document.getElementById('reportHours').value;
   const container = document.getElementById('reportContent');
@@ -1812,14 +1924,20 @@ document.addEventListener('keydown', function(e) {
     }
     return;
   }
-  // 1/2/3/4/5: switch tabs
+  // 1/2/3/4/5/6: switch tabs
   if (e.key === '1') { switchTab('board'); return; }
   if (e.key === '2') { switchTab('tasks'); return; }
   if (e.key === '3') { switchTab('pipelines'); return; }
   if (e.key === '4') { switchTab('schedules'); return; }
-  if (e.key === '5') { switchTab('report'); return; }
+  if (e.key === '5') { switchTab('review'); return; }
+  if (e.key === '6') { switchTab('report'); return; }
   // r: manual refresh
-  if (e.key === 'r') { fetchTasks(); fetchPipelines(); fetchSchedules(); fetchHealth(); if (activeTab === 'board') kbFetchTodos(); return; }
+  if (e.key === 'r') {
+    fetchTasks(); fetchPipelines(); fetchSchedules(); fetchHealth();
+    if (activeTab === 'board') kbFetchTodos();
+    if (activeTab === 'review') fetchReviewInbox();
+    return;
+  }
 });
 
 // ===== Kanban Board JS =====

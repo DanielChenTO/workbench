@@ -143,7 +143,7 @@ class TestDashboardStructure:
 class TestTabSystem:
     """Tests for the tab navigation system."""
 
-    EXPECTED_TABS = ["board", "tasks", "pipelines", "schedules", "report"]
+    EXPECTED_TABS = ["board", "tasks", "pipelines", "schedules", "review", "report"]
 
     def test_tab_bar_exists(self):
         assert 'id="tabBar"' in DASHBOARD_HTML
@@ -187,6 +187,7 @@ class TestJSFunctionDefinitions:
         "fetchTasks",
         "fetchPipelines",
         "fetchSchedules",
+        "fetchReviewInbox",
         "fetchReport",
     ]
 
@@ -366,6 +367,20 @@ class TestReportRendering:
     def test_fetchReport_function_exists(self):
         script = _extract_script(DASHBOARD_HTML)
         assert "function fetchReport(" in script or "async function fetchReport(" in script
+
+    def test_fetchReviewInbox_function_exists(self):
+        script = _extract_script(DASHBOARD_HTML)
+        assert (
+            "function fetchReviewInbox(" in script or "async function fetchReviewInbox(" in script
+        )
+
+    def test_renderReviewInbox_function_exists(self):
+        script = _extract_script(DASHBOARD_HTML)
+        assert "function renderReviewInbox(" in script
+
+    def test_review_inbox_api_endpoint_used(self):
+        script = _extract_script(DASHBOARD_HTML)
+        assert "/review-inbox?recent_hours=" in script
 
     def test_report_renders_orchestrator_section(self):
         """renderReport should handle data.orchestrators array."""
