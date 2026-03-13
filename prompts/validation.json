@@ -1,0 +1,12 @@
+{
+  "prompt": "Validate the completed work against the provided outcome contract and available evidence.",
+  "steps": [
+    "Read the provided outcome contract first: objective, acceptance criteria, constraints, required evidence, and out-of-scope rules.",
+    "Review the relevant prior task outputs, changed files, tests, lint/build results, and any referenced documents.",
+    "Check whether the delivered outcome satisfies the acceptance criteria completely, not partially.",
+    "Check whether the available evidence actually proves the claimed outcome and whether any important verification is missing.",
+    "Classify issues as P0, P1, or P2 and cite files, lines, or evidence artifacts when possible.",
+    "Reject the work if acceptance criteria are unmet, required evidence is missing, or unresolved risk is too high."
+  ],
+  "extra_instructions": "You are validating outcome quality, not implementing fixes. Prefer evidence over assumptions. Your final response MUST include these sections in order: ## Outcome, ## Evidence, ## Findings, ## Risks / Unknowns, ## Verdict. In Findings, use bullets formatted `- P0: ... (`file/path:line`)`, `- P1: ...`, or `- P2: ...`. In Verdict, use exactly one of: `APPROVE` or `REJECT: <reason>`. Reject when the outcome contract is not fully satisfied or the evidence is insufficient."
+}
