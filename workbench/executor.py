@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -17,8 +18,47 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+SILENT_FAILURE_CLASSIFIERS: tuple[tuple[re.Pattern[str], str, str], ...] = (
+    (
+        re.compile(
+            r"Cannot find module|Cannot find package|ERR_MODULE_NOT_FOUND|"
+            r"MODULE_NOT_FOUND|npm ERR!|pnpm ERR!|yarn (?:error|ERR)|node_modules",
+            re.IGNORECASE,
+        ),
+        "tooling_bootstrap_failure",
+        "Likely tool/dependency load failure. Verify `.opencode` dependencies are installed "
+        "(for example: `npm install` in `.opencode`) and retry.",
+    ),
+    (
+        re.compile(r"permission denied|EACCES|EPERM", re.IGNORECASE),
+        "environment_permission_failure",
+        "Likely environment/permission issue while launching tools. Check filesystem and "
+        "runtime permissions, then retry.",
+    ),
+)
+
 # Re-export for backward compatibility
 __all__ = ["ExecutorError", "build_prompt", "run_opencode"]
+
+
+def _normalize_usable_output(text: str) -> str:
+    """Return output with control sequences removed for usability checks."""
+    return ANSI_ESCAPE_PATTERN.sub("", text).strip()
+
+
+def _classify_silent_failure(stderr_text: str) -> tuple[str, str]:
+    """Classify zero-usable-output runs into a narrower failure class."""
+    for pattern, failure_class, guidance in SILENT_FAILURE_CLASSIFIERS:
+        if pattern.search(stderr_text):
+            return failure_class, guidance
+
+    return (
+        "silent_runtime_failure",
+        "OpenCode exited 0 without usable output. Inspect worker logs and stderr for early "
+        "termination details before retrying.",
+    )
 
 
 def build_prompt(
@@ -234,14 +274,16 @@ async def run_opencode(
             if log_callback:
                 log_callback(text)
 
+    async def _collect_and_wait() -> None:
+        # Read stdout and stderr concurrently
+        await asyncio.gather(
+            _read_stream(proc.stdout, collected_stdout),  # type: ignore[arg-type]
+            _read_stream(proc.stderr, collected_stderr, is_stderr=True),  # type: ignore[arg-type]
+        )
+        await proc.wait()
+
     try:
-        async with asyncio.timeout(timeout):
-            # Read stdout and stderr concurrently
-            await asyncio.gather(
-                _read_stream(proc.stdout, collected_stdout),  # type: ignore[arg-type]
-                _read_stream(proc.stderr, collected_stderr, is_stderr=True),  # type: ignore[arg-type]
-            )
-            await proc.wait()
+        await asyncio.wait_for(_collect_and_wait(), timeout=timeout)
     except TimeoutError:
         proc.kill()
         await proc.communicate()
@@ -258,17 +300,21 @@ async def run_opencode(
             f"stdout: {stdout_text[:1000]}"
         )
 
-    # Detect silent failures: opencode exits 0 but produces no output.
-    # This happens when tool loading fails (e.g. missing npm dependencies)
-    # — the process exits cleanly but the agent never actually ran.
-    if len(stdout_text.strip()) == 0:
+    usable_stdout = _normalize_usable_output(stdout_text)
+
+    # Detect silent failures: opencode exits 0 but produces no usable output.
+    # This includes fully empty output and control-sequence-only output where
+    # the process appears successful but no final content is available.
+    if not usable_stdout:
+        failure_class, guidance = _classify_silent_failure(stderr_text)
         log.error(
-            "opencode run produced 0 bytes output (silent failure). "
-            "stderr: %s", stderr_text[:1000]
+            "opencode run produced no usable output (class=%s). stderr: %s",
+            failure_class,
+            stderr_text[:1000],
         )
         raise ExecutorError(
-            "opencode run exited successfully but produced no output — "
-            "likely a silent failure (e.g. tool loading error, missing dependencies).\n"
+            "opencode run exited successfully but produced no usable output "
+            f"(class={failure_class}). {guidance}\n"
             f"stderr: {stderr_text[:1000]}"
         )
 

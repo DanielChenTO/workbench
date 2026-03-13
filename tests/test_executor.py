@@ -1,4 +1,4 @@
-"""Unit tests for workbench.executor — zero-output failure detection."""
+"""Unit tests for workbench.executor silent-output hardening."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from workbench.executor import run_opencode
 
 
 class TestZeroOutputDetection:
-    """Tests for silent failure detection when opencode produces no output."""
+    """Tests for silent failure detection when opencode produces unusable output."""
 
     @pytest.fixture(autouse=True)
     def _patch_settings(self, tmp_path: Path):
@@ -53,14 +53,13 @@ class TestZeroOutputDetection:
         with patch("workbench.executor.asyncio") as mock_asyncio:
             mock_asyncio.create_subprocess_exec = AsyncMock(return_value=proc)
             mock_asyncio.subprocess = asyncio.subprocess
-            mock_asyncio.timeout = asyncio.timeout
+            mock_asyncio.wait_for = asyncio.wait_for
             mock_asyncio.gather = asyncio.gather
+            mock_asyncio.TimeoutError = asyncio.TimeoutError
             mock_asyncio.StreamReader = asyncio.StreamReader
 
-            with pytest.raises(ExecutorError, match="no output"):
-                asyncio.get_event_loop().run_until_complete(
-                    run_opencode("test prompt", tmp_path)
-                )
+            with pytest.raises(ExecutorError, match="no usable output"):
+                asyncio.get_event_loop().run_until_complete(run_opencode("test prompt", tmp_path))
 
     def test_nonempty_output_succeeds(self, tmp_path: Path):
         """opencode exiting with rc=0 and non-empty stdout should succeed."""
@@ -73,8 +72,9 @@ class TestZeroOutputDetection:
         with patch("workbench.executor.asyncio") as mock_asyncio:
             mock_asyncio.create_subprocess_exec = AsyncMock(return_value=proc)
             mock_asyncio.subprocess = asyncio.subprocess
-            mock_asyncio.timeout = asyncio.timeout
+            mock_asyncio.wait_for = asyncio.wait_for
             mock_asyncio.gather = asyncio.gather
+            mock_asyncio.TimeoutError = asyncio.TimeoutError
             mock_asyncio.StreamReader = asyncio.StreamReader
 
             result = asyncio.get_event_loop().run_until_complete(
@@ -89,14 +89,13 @@ class TestZeroOutputDetection:
         with patch("workbench.executor.asyncio") as mock_asyncio:
             mock_asyncio.create_subprocess_exec = AsyncMock(return_value=proc)
             mock_asyncio.subprocess = asyncio.subprocess
-            mock_asyncio.timeout = asyncio.timeout
+            mock_asyncio.wait_for = asyncio.wait_for
             mock_asyncio.gather = asyncio.gather
+            mock_asyncio.TimeoutError = asyncio.TimeoutError
             mock_asyncio.StreamReader = asyncio.StreamReader
 
             with pytest.raises(ExecutorError, match="exited with code 1"):
-                asyncio.get_event_loop().run_until_complete(
-                    run_opencode("test prompt", tmp_path)
-                )
+                asyncio.get_event_loop().run_until_complete(run_opencode("test prompt", tmp_path))
 
     def test_whitespace_only_output_raises(self, tmp_path: Path):
         """opencode producing only whitespace should be treated as zero output."""
@@ -105,11 +104,44 @@ class TestZeroOutputDetection:
         with patch("workbench.executor.asyncio") as mock_asyncio:
             mock_asyncio.create_subprocess_exec = AsyncMock(return_value=proc)
             mock_asyncio.subprocess = asyncio.subprocess
-            mock_asyncio.timeout = asyncio.timeout
+            mock_asyncio.wait_for = asyncio.wait_for
             mock_asyncio.gather = asyncio.gather
+            mock_asyncio.TimeoutError = asyncio.TimeoutError
             mock_asyncio.StreamReader = asyncio.StreamReader
 
-            with pytest.raises(ExecutorError, match="no output"):
-                asyncio.get_event_loop().run_until_complete(
-                    run_opencode("test prompt", tmp_path)
-                )
+            with pytest.raises(ExecutorError, match="no usable output"):
+                asyncio.get_event_loop().run_until_complete(run_opencode("test prompt", tmp_path))
+
+    def test_ansi_only_output_raises(self, tmp_path: Path):
+        """ANSI control-sequence-only output should be treated as unusable output."""
+        proc = self._make_mock_process(stdout="\x1b[2K\x1b[1G", stderr="", returncode=0)
+
+        with patch("workbench.executor.asyncio") as mock_asyncio:
+            mock_asyncio.create_subprocess_exec = AsyncMock(return_value=proc)
+            mock_asyncio.subprocess = asyncio.subprocess
+            mock_asyncio.wait_for = asyncio.wait_for
+            mock_asyncio.gather = asyncio.gather
+            mock_asyncio.TimeoutError = asyncio.TimeoutError
+            mock_asyncio.StreamReader = asyncio.StreamReader
+
+            with pytest.raises(ExecutorError, match="no usable output"):
+                asyncio.get_event_loop().run_until_complete(run_opencode("test prompt", tmp_path))
+
+    def test_dependency_load_error_gets_specific_classification(self, tmp_path: Path):
+        """Known dependency/tooling errors should get a narrow failure class."""
+        proc = self._make_mock_process(
+            stdout="",
+            stderr="Error: Cannot find module '/repo/.opencode/node_modules/foo'",
+            returncode=0,
+        )
+
+        with patch("workbench.executor.asyncio") as mock_asyncio:
+            mock_asyncio.create_subprocess_exec = AsyncMock(return_value=proc)
+            mock_asyncio.subprocess = asyncio.subprocess
+            mock_asyncio.wait_for = asyncio.wait_for
+            mock_asyncio.gather = asyncio.gather
+            mock_asyncio.TimeoutError = asyncio.TimeoutError
+            mock_asyncio.StreamReader = asyncio.StreamReader
+
+            with pytest.raises(ExecutorError, match="class=tooling_bootstrap_failure"):
+                asyncio.get_event_loop().run_until_complete(run_opencode("test prompt", tmp_path))
