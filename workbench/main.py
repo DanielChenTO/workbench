@@ -1909,11 +1909,13 @@ def _init_workspace(args) -> None:
     print("Next steps:")
     print("  1. Ensure workbench itself is installed and migrated on this machine")
     print(f"  2. Start workbench: {result.serve_script_path}")
+    print("  3. Verify workbench health: workbench doctor")
+    print("  4. Verify workspace wiring: workbench smoke-test")
     print(
-        f"  3. If needed, install .opencode dependencies: cd {target / '.opencode'} && npm install"
+        f"  5. If needed, install .opencode dependencies: cd {target / '.opencode'} && npm install"
     )
-    print("  4. Open a new OpenCode session in the workspace")
-    print("  5. MCP integration is enabled in opencode.json")
+    print("  6. Open a new OpenCode session in the workspace")
+    print("  7. MCP integration is enabled in opencode.json")
     print("Set WORKBENCH_URL if the service is not at http://127.0.0.1:8420")
 
 

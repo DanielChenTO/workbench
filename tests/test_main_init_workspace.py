@@ -48,3 +48,15 @@ def test_init_workspace_tool_set_matches_install_workspace(tmp_path: Path):
         p.name for p in (script_workspace / ".opencode" / "tools").glob("*.ts")
     )
     assert cli_installed == script_installed == sorted(TOOL_FILES)
+
+
+def test_init_workspace_next_steps_verify_doctor_before_smoke(capsys, tmp_path: Path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    _init_workspace(SimpleNamespace(target=str(workspace)))
+    out = capsys.readouterr().out
+
+    doctor_pos = out.index("3. Verify workbench health: workbench doctor")
+    smoke_pos = out.index("4. Verify workspace wiring: workbench smoke-test")
+    assert doctor_pos < smoke_pos
