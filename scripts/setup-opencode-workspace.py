@@ -9,6 +9,23 @@ from pathlib import Path
 from workbench.workspace_setup import TOOL_FILES, install_workspace
 
 
+def _next_steps(*, workspace_root: Path, serve_script_path: Path, mcp_enabled: bool) -> list[str]:
+    steps = [
+        "Ensure workbench itself is installed and migrated on this machine",
+        f"Start workbench: {serve_script_path}",
+        "Verify workbench health: workbench doctor",
+        "Verify workspace wiring: workbench smoke-test",
+        (
+            "If needed, install .opencode dependencies: "
+            f"cd {workspace_root / '.opencode'} && npm install"
+        ),
+        "Open a new OpenCode session in the workspace",
+    ]
+    if mcp_enabled:
+        steps.append("MCP integration is enabled in opencode.json")
+    return steps
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Install workbench integration into an arbitrary OpenCode workspace."
@@ -54,14 +71,15 @@ def main() -> int:
     print(f"MCP helper:               {result.mcp_script_path}")
     print("")
     print("Next steps:")
-    print("  1. Ensure workbench itself is installed and migrated on this machine")
-    print(f"  2. Start workbench: {result.serve_script_path}")
-    print(
-        f"  3. If needed, install .opencode dependencies: cd {workspace_root / '.opencode'} && npm install"
-    )
-    print("  4. Open a new OpenCode session in the workspace")
-    if not args.disable_mcp:
-        print("  5. MCP integration is enabled in opencode.json")
+    for idx, step in enumerate(
+        _next_steps(
+            workspace_root=workspace_root,
+            serve_script_path=result.serve_script_path,
+            mcp_enabled=not args.disable_mcp,
+        ),
+        start=1,
+    ):
+        print(f"  {idx}. {step}")
     return 0
 
 
