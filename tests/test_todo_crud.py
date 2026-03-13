@@ -715,6 +715,44 @@ def _make_task_info(
     )
 
 
+def _make_pipeline_row(
+    *,
+    id: str,
+    status: str,
+    current_task_id: str | None = None,
+    review_iteration: int = 0,
+    created_at: datetime | None = None,
+    completed_at: datetime | None = None,
+) -> SimpleNamespace:
+    now = datetime.now(UTC)
+    created = created_at or now
+    return SimpleNamespace(
+        id=id,
+        repo="workbench",
+        stages_json=json.dumps(
+            [
+                {
+                    "name": "implement",
+                    "autonomy": "local",
+                    "prompt": "do work",
+                    "review_gate": False,
+                }
+            ]
+        ),
+        current_stage_index=0,
+        current_task_id=current_task_id,
+        status=status,
+        max_review_iterations=3,
+        review_iteration=review_iteration,
+        model=None,
+        task_ids_json=json.dumps([current_task_id] if current_task_id else []),
+        depends_on_json=None,
+        error="pipeline needs review",
+        created_at=created,
+        completed_at=completed_at,
+    )
+
+
 class TestTodoCoverageHelpers:
     def test_extract_markdown_section(self):
         text = (
@@ -1098,27 +1136,36 @@ class TestReviewInboxRoute:
 
             with patch("workbench.main.list_todos", AsyncMock(return_value=[todo])):
                 with patch(
-                    "workbench.main.list_tasks_since",
+                    "workbench.main.list_tasks_by_statuses",
                     AsyncMock(
-                        return_value=[
-                            SimpleNamespace(id="row-blocked"),
-                            SimpleNamespace(id="row-failed"),
+                        side_effect=[
+                            [
+                                SimpleNamespace(id="task-blocked"),
+                                SimpleNamespace(id="task-failed"),
+                            ],
+                            [],
                         ]
                     ),
-                ):
+                ) as mock_list_tasks_by_statuses:
                     with patch(
-                        "workbench.main.list_tasks",
-                        AsyncMock(return_value=([], 0)),
+                        "workbench.main.list_pipelines_by_statuses",
+                        AsyncMock(return_value=[failed_pipeline_row]),
                     ):
+                        row_to_task = {
+                            "task-blocked": blocked_task,
+                            "task-failed": failed_task,
+                        }
+
+                        def _task_row_to_info_side_effect(row):
+                            return row_to_task[row.id]
+
                         with patch(
-                            "workbench.main.list_pipelines",
-                            AsyncMock(return_value=([failed_pipeline_row], 1)),
+                            "workbench.main.task_row_to_info",
+                            side_effect=_task_row_to_info_side_effect,
                         ):
-                            with patch(
-                                "workbench.main.task_row_to_info",
-                                side_effect=[blocked_task, failed_task],
-                            ):
-                                result = await review_inbox_route(recent_hours=72)
+                            result = await review_inbox_route(recent_hours=72)
+
+        assert mock_list_tasks_by_statuses.await_count == 2
 
         assert isinstance(result, ReviewInboxResponse)
         assert result.counts.total >= 3
@@ -1139,3 +1186,214 @@ class TestReviewInboxRoute:
 
         assert exc.value.status_code == 400
         assert "recent_hours" in exc.value.detail
+
+    @pytest.mark.asyncio
+    async def test_recent_hours_applies_to_failed_sources_but_not_review_todos(self):
+        session = AsyncMock()
+
+        review_todo = _make_todo_row(
+            id="todo-review-only",
+            title="Needs review with no recent execution",
+            status="review",
+        )
+
+        with patch("workbench.main.async_session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=session)
+            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with patch("workbench.main.list_todos", AsyncMock(return_value=[review_todo])):
+                stale_failed_task = _make_task_info(
+                    id="task-stale-failed",
+                    source="Old failure",
+                    status=TaskStatus.FAILED,
+                    created_at=datetime(2024, 1, 1, tzinfo=UTC),
+                )
+                stale_failed_task.completed_at = datetime(2024, 1, 1, tzinfo=UTC)
+
+                with patch(
+                    "workbench.main.list_tasks_by_statuses",
+                    AsyncMock(side_effect=[[SimpleNamespace(id="row-stale")], []]),
+                ) as mock_list_tasks_by_statuses:
+                    with patch(
+                        "workbench.main.list_pipelines_by_statuses",
+                        AsyncMock(return_value=[]),
+                    ) as mock_list_pipelines_by_statuses:
+                        row_to_task = {
+                            "row-stale": stale_failed_task,
+                        }
+
+                        def _task_row_to_info_side_effect(row):
+                            return row_to_task[row.id]
+
+                        with patch(
+                            "workbench.main.task_row_to_info",
+                            side_effect=_task_row_to_info_side_effect,
+                        ):
+                            result = await review_inbox_route(recent_hours=24)
+
+        first_call = mock_list_tasks_by_statuses.await_args_list[0]
+        second_call = mock_list_tasks_by_statuses.await_args_list[1]
+        assert first_call.kwargs["statuses"] == ["blocked", "stuck", "failed"]
+        assert first_call.kwargs["since"] is None
+        assert second_call.kwargs["since"] is None
+
+        pipeline_call = mock_list_pipelines_by_statuses.await_args
+        assert pipeline_call.kwargs["statuses"] == ["failed", "cancelled"]
+        assert pipeline_call.kwargs["since"] is None
+
+        assert result.counts.total == 1
+        assert result.counts.todo_review_items == 1
+        assert all(item.kind != "task" for item in result.items)
+        assert all(item.kind != "pipeline" for item in result.items)
+
+    @pytest.mark.asyncio
+    async def test_recent_hours_uses_review_relevant_task_timestamps(self):
+        session = AsyncMock()
+
+        now = datetime.now(UTC)
+        stale_failed = _make_task_info(
+            id="task-failed-stale",
+            source="older failure",
+            status=TaskStatus.FAILED,
+            repo="workbench",
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        stale_failed.completed_at = datetime(2024, 1, 2, tzinfo=UTC)
+
+        recent_failed = _make_task_info(
+            id="task-failed-recent",
+            source="recent failure",
+            status=TaskStatus.FAILED,
+            repo="workbench",
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        recent_failed.completed_at = now
+
+        stale_blocked = _make_task_info(
+            id="task-blocked-stale",
+            source="old block",
+            status=TaskStatus.BLOCKED,
+            repo="workbench",
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        stale_blocked.last_heartbeat = datetime(2024, 1, 3, tzinfo=UTC)
+        stale_blocked.blocked_reason = "waiting"
+
+        recent_blocked = _make_task_info(
+            id="task-blocked-recent",
+            source="recent block",
+            status=TaskStatus.BLOCKED,
+            repo="workbench",
+            created_at=datetime(2024, 1, 1, tzinfo=UTC),
+        )
+        recent_blocked.last_heartbeat = now
+        recent_blocked.blocked_reason = "waiting"
+
+        with patch("workbench.main.async_session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=session)
+            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with patch("workbench.main.list_todos", AsyncMock(return_value=[])):
+                with patch(
+                    "workbench.main.list_tasks_by_statuses",
+                    AsyncMock(
+                        side_effect=[
+                            [
+                                SimpleNamespace(id="task-failed-stale"),
+                                SimpleNamespace(id="task-failed-recent"),
+                                SimpleNamespace(id="task-blocked-stale"),
+                                SimpleNamespace(id="task-blocked-recent"),
+                            ],
+                            [],
+                        ]
+                    ),
+                ):
+                    with patch(
+                        "workbench.main.list_pipelines_by_statuses",
+                        AsyncMock(return_value=[]),
+                    ):
+                        row_to_task = {
+                            "task-failed-stale": stale_failed,
+                            "task-failed-recent": recent_failed,
+                            "task-blocked-stale": stale_blocked,
+                            "task-blocked-recent": recent_blocked,
+                        }
+
+                        def _task_row_to_info_side_effect(row):
+                            return row_to_task[row.id]
+
+                        with patch(
+                            "workbench.main.task_row_to_info",
+                            side_effect=_task_row_to_info_side_effect,
+                        ):
+                            result = await review_inbox_route(recent_hours=24)
+
+        task_ids = {item.task_id for item in result.items if item.kind == "task"}
+        assert "task-failed-recent" in task_ids
+        assert "task-blocked-recent" in task_ids
+        assert "task-failed-stale" not in task_ids
+        assert "task-blocked-stale" not in task_ids
+
+    @pytest.mark.asyncio
+    async def test_failed_and_cancelled_pipeline_counts_are_separate(self):
+        session = AsyncMock()
+
+        now = datetime.now(UTC)
+        failed_pipeline = _make_pipeline_row(
+            id="pipe-failed",
+            status="failed",
+            completed_at=now,
+        )
+        cancelled_pipeline = _make_pipeline_row(
+            id="pipe-cancelled",
+            status="cancelled",
+            completed_at=now,
+        )
+
+        with patch("workbench.main.async_session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=session)
+            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with patch("workbench.main.list_todos", AsyncMock(return_value=[])):
+                with patch(
+                    "workbench.main.list_tasks_by_statuses",
+                    AsyncMock(side_effect=[[], []]),
+                ):
+                    with patch(
+                        "workbench.main.list_pipelines_by_statuses",
+                        AsyncMock(return_value=[failed_pipeline, cancelled_pipeline]),
+                    ):
+                        result = await review_inbox_route(recent_hours=24)
+
+        assert result.counts.failed_pipelines == 1
+        assert result.counts.cancelled_pipelines == 1
+
+    @pytest.mark.asyncio
+    async def test_review_inbox_uses_batched_queries_not_status_fanout(self):
+        session = AsyncMock()
+
+        with patch("workbench.main.async_session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=session)
+            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with patch("workbench.main.list_todos", AsyncMock(return_value=[])):
+                with patch(
+                    "workbench.main.list_tasks", AsyncMock(return_value=([], 0))
+                ) as mock_list_tasks:
+                    with patch(
+                        "workbench.main.list_pipelines",
+                        AsyncMock(return_value=([], 0)),
+                    ) as mock_list_pipelines:
+                        with patch(
+                            "workbench.main.list_tasks_by_statuses",
+                            AsyncMock(side_effect=[[], []]),
+                        ):
+                            with patch(
+                                "workbench.main.list_pipelines_by_statuses",
+                                AsyncMock(return_value=[]),
+                            ):
+                                result = await review_inbox_route(recent_hours=12)
+
+        assert result.counts.total == 0
+        assert mock_list_tasks.await_count == 0
+        assert mock_list_pipelines.await_count == 0

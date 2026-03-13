@@ -756,6 +756,28 @@ async def list_tasks_since(
     return list(rows)
 
 
+async def list_tasks_by_statuses(
+    session: AsyncSession,
+    *,
+    statuses: list[str],
+    since: datetime | None = None,
+) -> list[TaskRow]:
+    """Return tasks for any status in `statuses`, newest first.
+
+    Optional `since` applies a created_at lower bound.
+    """
+    if not statuses:
+        return []
+
+    query = select(TaskRow).where(TaskRow.status.in_(statuses))
+    if since is not None:
+        query = query.where(TaskRow.created_at >= since)
+
+    query = query.order_by(TaskRow.created_at.desc())
+    rows = (await session.execute(query)).scalars().all()
+    return list(rows)
+
+
 async def list_pipelines_since(
     session: AsyncSession,
     *,
@@ -771,6 +793,28 @@ async def list_pipelines_since(
 
     if status:
         query = query.where(PipelineRow.status == status)
+
+    query = query.order_by(PipelineRow.created_at.desc())
+    rows = (await session.execute(query)).scalars().all()
+    return list(rows)
+
+
+async def list_pipelines_by_statuses(
+    session: AsyncSession,
+    *,
+    statuses: list[str],
+    since: datetime | None = None,
+) -> list[PipelineRow]:
+    """Return pipelines for any status in `statuses`, newest first.
+
+    Optional `since` applies a created_at lower bound.
+    """
+    if not statuses:
+        return []
+
+    query = select(PipelineRow).where(PipelineRow.status.in_(statuses))
+    if since is not None:
+        query = query.where(PipelineRow.created_at >= since)
 
     query = query.order_by(PipelineRow.created_at.desc())
     rows = (await session.execute(query)).scalars().all()

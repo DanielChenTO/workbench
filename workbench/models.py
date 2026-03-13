@@ -573,6 +573,7 @@ class ReviewInboxCounts(BaseModel):
     blocked_tasks: int = 0
     failed_tasks: int = 0
     failed_pipelines: int = 0
+    cancelled_pipelines: int = 0
     todo_review_items: int = 0
 
 

@@ -37,9 +37,11 @@ from .database import (
     get_todo,
     init_db,
     list_pipelines,
+    list_pipelines_by_statuses,
     list_pipelines_since,
     list_schedules,
     list_tasks,
+    list_tasks_by_statuses,
     list_tasks_since,
     list_todos,
     update_pipeline,
@@ -667,6 +669,7 @@ async def list_todos_route(
 
 
 _ACTIVE_TASK_STATUSES = {"queued", "resolving", "running", "creating_pr", "blocked", "stuck"}
+_REVIEW_CONTEXT_ACTIVE_STATUSES = ["queued", "resolving", "running", "creating_pr"]
 
 
 def _extract_repo_hints(todo: TodoInfo) -> list[str]:
@@ -816,6 +819,22 @@ def _task_recommendation(task: TaskInfo) -> tuple[str, str]:
     return "Review suggested", "Inspect task details"
 
 
+def _task_review_timestamp(task: TaskInfo) -> datetime:
+    """Best available review-relevant timestamp for task recency windows."""
+    if task.status.value in {"failed", "stuck"}:
+        return task.completed_at or task.last_heartbeat or task.created_at
+    if task.status.value == "blocked":
+        return task.last_heartbeat or task.completed_at or task.created_at
+    return task.completed_at or task.last_heartbeat or task.created_at
+
+
+def _pipeline_review_timestamp(pipeline: PipelineInfo) -> datetime:
+    """Best available review-relevant timestamp for pipeline recency windows."""
+    if pipeline.status.value in {"failed", "cancelled"}:
+        return pipeline.completed_at or pipeline.created_at
+    return pipeline.created_at
+
+
 @app.get("/review-inbox", response_model=ReviewInboxResponse)
 async def review_inbox_route(recent_hours: int = 72):
     """Return review-focused items that currently need human judgment."""
@@ -828,19 +847,42 @@ async def review_inbox_route(recent_hours: int = 72):
 
     async with async_session() as session:
         todo_rows = await list_todos(session, limit=1000)
-        recent_task_rows = await list_tasks_since(session, since=cutoff)
-        active_task_rows: list[TaskRow] = []
-        for status in sorted(_ACTIVE_TASK_STATUSES):
-            status_rows, _ = await list_tasks(session, status=status, limit=1000, offset=0)
-            active_task_rows.extend(status_rows)
-        failed_rows, _ = await list_tasks(session, status="failed", limit=1000, offset=0)
-        pipeline_rows, _ = await list_pipelines(session, limit=2000, offset=0)
+        bounded_task_rows = await list_tasks_by_statuses(
+            session,
+            statuses=["blocked", "stuck", "failed"],
+            since=None,
+        )
+        bounded_pipeline_rows = await list_pipelines_by_statuses(
+            session,
+            statuses=["failed", "cancelled"],
+            since=None,
+        )
+
+        # Include active context tasks regardless of recency for linkage/evidence.
+        active_context_rows = await list_tasks_by_statuses(
+            session,
+            statuses=_REVIEW_CONTEXT_ACTIVE_STATUSES,
+            since=None,
+        )
 
     todos = [todo_row_to_info(row) for row in todo_rows]
-    all_task_rows_by_id: dict[str, TaskRow] = {row.id: row for row in recent_task_rows}
-    for row in active_task_rows + failed_rows:
+
+    all_task_rows_by_id: dict[str, TaskRow] = {row.id: row for row in bounded_task_rows}
+    for row in active_context_rows:
         all_task_rows_by_id[row.id] = row
-    all_tasks = [task_row_to_info(row) for row in all_task_rows_by_id.values()]
+
+    task_info_by_id = {row_id: task_row_to_info(row) for row_id, row in all_task_rows_by_id.items()}
+    bounded_task_ids = {
+        row.id
+        for row in bounded_task_rows
+        if _task_review_timestamp(task_info_by_id[row.id]) >= cutoff
+    }
+    all_tasks = list(task_info_by_id.values())
+    all_tasks = [
+        task
+        for task in all_tasks
+        if task.id in bounded_task_ids or task.status.value in _REVIEW_CONTEXT_ACTIVE_STATUSES
+    ]
     task_by_id = {task.id: task for task in all_tasks}
 
     items: list[ReviewInboxItem] = []
@@ -872,13 +914,14 @@ async def review_inbox_route(recent_hours: int = 72):
                 branch=task.branch,
                 stage_name=task.stage_name,
                 created_at=task.created_at,
-                updated_at=task.completed_at or task.last_heartbeat or task.created_at,
+                updated_at=_task_review_timestamp(task),
             )
         )
 
-    for row in pipeline_rows:
+    for row in bounded_pipeline_rows:
         pipeline = _pipeline_row_to_info(row)
-        if pipeline.status.value not in {"failed", "cancelled"}:
+        pipeline_review_ts = _pipeline_review_timestamp(pipeline)
+        if pipeline_review_ts < cutoff:
             continue
         current_task = task_by_id.get(pipeline.current_task_id or "")
         evidence = _compact_one_line(
@@ -887,7 +930,11 @@ async def review_inbox_route(recent_hours: int = 72):
             else None
         )
         why = "Pipeline ended without successful completion"
-        if pipeline.review_iteration > 0:
+        recommendation = "Inspect pipeline stages and decide rerun or manual follow-up"
+        if pipeline.status.value == "cancelled":
+            why = "Pipeline was cancelled before completion"
+            recommendation = "Confirm cancellation intent and decide rerun or follow-up"
+        elif pipeline.review_iteration > 0:
             why = (
                 f"Pipeline exhausted review loop ({pipeline.review_iteration}/"
                 f"{pipeline.max_review_iterations})"
@@ -898,7 +945,7 @@ async def review_inbox_route(recent_hours: int = 72):
                 kind="pipeline",
                 title=f"Pipeline {pipeline.id[:12]} requires decision",
                 why=why,
-                recommendation="Inspect pipeline stages and decide rerun or manual follow-up",
+                recommendation=recommendation,
                 status=pipeline.status.value,
                 summary=_compact_one_line(pipeline.error),
                 evidence_summary=evidence,
@@ -909,7 +956,7 @@ async def review_inbox_route(recent_hours: int = 72):
                 branch=current_task.branch if current_task else None,
                 stage_name=current_task.stage_name if current_task else None,
                 created_at=pipeline.created_at,
-                updated_at=pipeline.completed_at or pipeline.created_at,
+                updated_at=pipeline_review_ts,
             )
         )
 
@@ -987,7 +1034,10 @@ async def review_inbox_route(recent_hours: int = 72):
         total=len(items),
         blocked_tasks=sum(1 for i in items if i.kind == "task" and i.status == "blocked"),
         failed_tasks=sum(1 for i in items if i.kind == "task" and i.status == "failed"),
-        failed_pipelines=sum(1 for i in items if i.kind == "pipeline"),
+        failed_pipelines=sum(1 for i in items if i.kind == "pipeline" and i.status == "failed"),
+        cancelled_pipelines=sum(
+            1 for i in items if i.kind == "pipeline" and i.status == "cancelled"
+        ),
         todo_review_items=sum(1 for i in items if i.kind == "todo"),
     )
 
