@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import re
 import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -62,6 +63,10 @@ from .models import (
     TaskInfo,
     TaskInputType,
     TaskListResponse,
+    TodoCoverageInfo,
+    TodoCoverageListResponse,
+    TodoCoverageSummary,
+    TodoCoverageTaskRef,
     TodoCreate,
     TodoInfo,
     TodoListResponse,
@@ -651,6 +656,160 @@ async def list_todos_route(
     return TodoListResponse(
         todos=[todo_row_to_info(r) for r in rows],
         total=total,
+    )
+
+
+_ACTIVE_TASK_STATUSES = {"queued", "resolving", "running", "creating_pr", "blocked", "stuck"}
+
+
+def _extract_repo_hints(todo: TodoInfo) -> list[str]:
+    hints: list[str] = []
+    source_ref = todo.source_ref or ""
+
+    if source_ref:
+        for token in re.findall(r"[A-Za-z0-9_.\-/]+", source_ref):
+            if "/" in token and token not in hints:
+                hints.append(token)
+
+    for tag in todo.tags or []:
+        if not tag:
+            continue
+        if tag.startswith("repo:"):
+            repo = tag.split(":", 1)[1].strip()
+            if repo and repo not in hints:
+                hints.append(repo)
+        elif "/" in tag and tag not in hints:
+            hints.append(tag)
+
+    return hints
+
+
+def _extract_initiative_tags(todo: TodoInfo) -> list[str]:
+    tags = todo.tags or []
+    result: list[str] = []
+    for tag in tags:
+        lower = tag.lower()
+        if any(
+            lower.startswith(prefix)
+            for prefix in ("initiative:", "epic:", "program:", "stream:", "theme:", "project:")
+        ):
+            result.append(tag)
+    return result
+
+
+def _task_matches_todo(todo: TodoInfo, task: TaskInfo, repo_hints: list[str]) -> bool:
+    source = task.input.source or ""
+    summary = task.summary or ""
+    haystack = "\n".join((source, summary)).lower()
+
+    if todo.jira_key and todo.jira_key.lower() in haystack:
+        return True
+
+    if todo.source_ref:
+        source_ref = todo.source_ref.strip().lower()
+        if source_ref and source_ref in haystack:
+            return True
+
+    for tag in _extract_initiative_tags(todo):
+        value = tag.split(":", 1)[1].strip().lower() if ":" in tag else tag.lower()
+        if len(value) >= 3 and value in haystack:
+            return True
+
+    for hint in repo_hints:
+        hint_lower = hint.lower()
+        if hint_lower and hint_lower in haystack:
+            return True
+
+    return False
+
+
+def _to_coverage_task_ref(task: TaskInfo) -> TodoCoverageTaskRef:
+    return TodoCoverageTaskRef(
+        id=task.id,
+        status=task.status,
+        repo=task.input.repo,
+        summary=task.summary,
+        pipeline_id=task.pipeline_id,
+        stage_name=task.stage_name,
+        created_at=task.created_at,
+    )
+
+
+@app.get("/todos/coverage", response_model=TodoCoverageListResponse)
+async def list_todo_coverage_route(recent_hours: int = 72):
+    """Return todo-to-task/pipeline linkage coverage for the board UX."""
+    from datetime import timedelta
+
+    if recent_hours <= 0:
+        raise HTTPException(status_code=400, detail="recent_hours must be > 0")
+
+    cutoff = datetime.now(UTC) - timedelta(hours=recent_hours)
+
+    async with async_session() as session:
+        todo_rows = await list_todos(session, limit=1000)
+        task_rows = await list_tasks_since(session, since=cutoff)
+        pipeline_rows = await list_pipelines_since(session, since=cutoff)
+
+    todos = [todo_row_to_info(row) for row in todo_rows]
+    tasks = [task_row_to_info(row) for row in task_rows]
+    pipeline_ids = {p.id for p in pipeline_rows}
+
+    coverages: list[TodoCoverageInfo] = []
+    covered_todos = 0
+    active_linked_todos = 0
+
+    for todo in todos:
+        repo_hints = _extract_repo_hints(todo)
+        initiative_tags = _extract_initiative_tags(todo)
+        related = [t for t in tasks if _task_matches_todo(todo, t, repo_hints)]
+
+        active_tasks = [t for t in related if t.status.value in _ACTIVE_TASK_STATUSES]
+        recent_tasks = sorted(related, key=lambda t: t.created_at, reverse=True)[:5]
+
+        related_pipeline_ids = sorted(
+            {
+                t.pipeline_id
+                for t in related
+                if t.pipeline_id
+                and (t.pipeline_id in pipeline_ids or t.status.value in _ACTIVE_TASK_STATUSES)
+            }
+        )
+
+        needs_task = len(related) == 0
+        if not needs_task:
+            covered_todos += 1
+        if active_tasks:
+            active_linked_todos += 1
+
+        coverages.append(
+            TodoCoverageInfo(
+                todo_id=todo.id,
+                jira_key=todo.jira_key,
+                source_ref=todo.source_ref,
+                initiative_tags=initiative_tags,
+                repo_hints=repo_hints,
+                related_active_task_count=len(active_tasks),
+                related_recent_task_count=len(related),
+                related_pipeline_count=len(related_pipeline_ids),
+                active_tasks=[_to_coverage_task_ref(t) for t in active_tasks[:3]],
+                recent_tasks=[_to_coverage_task_ref(t) for t in recent_tasks],
+                related_pipeline_ids=related_pipeline_ids,
+                needs_task=needs_task,
+            )
+        )
+
+    summary = TodoCoverageSummary(
+        total_todos=len(todos),
+        covered_todos=covered_todos,
+        uncovered_todos=max(len(todos) - covered_todos, 0),
+        active_linked_todos=active_linked_todos,
+    )
+
+    return TodoCoverageListResponse(
+        generated_at=datetime.now(UTC),
+        recent_hours=recent_hours,
+        coverages=coverages,
+        summary=summary,
     )
 
 

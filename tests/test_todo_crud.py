@@ -19,7 +19,22 @@ from workbench.database import (
     shift_todo_siblings,
     update_todo,
 )
+from workbench.main import (
+    _extract_repo_hints,
+    _task_matches_todo,
+    list_todo_coverage_route,
+    reorder_todo_route,
+    update_todo_route,
+)
 from workbench.models import (
+    Autonomy,
+    TaskCreate,
+    TaskInfo,
+    TaskInputType,
+    TaskStatus,
+    TodoCoverageInfo,
+    TodoCoverageListResponse,
+    TodoCoverageSummary,
     TodoCreate,
     TodoInfo,
     TodoListResponse,
@@ -27,7 +42,6 @@ from workbench.models import (
     TodoUpdate,
     todo_row_to_info,
 )
-from workbench.main import reorder_todo_route, update_todo_route
 
 
 # ---------------------------------------------------------------------------
@@ -405,7 +419,6 @@ class TestUpdateTodoTimestamp:
     @pytest.mark.asyncio
     async def test_updated_at_injected_when_not_provided(self):
         """update_todo should add updated_at=func.now() to values."""
-        from sqlalchemy import func
 
         session = AsyncMock()
         session.execute.return_value = MagicMock()
@@ -423,9 +436,9 @@ class TestUpdateTodoTimestamp:
     @pytest.mark.asyncio
     async def test_updated_at_not_overwritten_when_provided(self):
         """If caller explicitly passes updated_at, it should not be overwritten."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        fixed_time = datetime(2025, 1, 1, tzinfo=timezone.utc)
+        fixed_time = datetime(2025, 1, 1, tzinfo=UTC)
 
         session = AsyncMock()
         session.execute.return_value = MagicMock()
@@ -648,3 +661,162 @@ class TestTodoListResponse:
         resp = TodoListResponse(todos=[todo], total=100)
         assert len(resp.todos) == 1
         assert resp.total == 100
+
+
+def _make_task_info(
+    *,
+    id: str,
+    source: str,
+    status: TaskStatus,
+    repo: str | None = None,
+    summary: str | None = None,
+    pipeline_id: str | None = None,
+    stage_name: str | None = None,
+) -> TaskInfo:
+    now = datetime.now(UTC)
+    return TaskInfo(
+        id=id,
+        input=TaskCreate(
+            type=TaskInputType.PROMPT,
+            source=source,
+            repo=repo,
+            autonomy=Autonomy.LOCAL,
+        ),
+        status=status,
+        phase=None,
+        branch=None,
+        pr_url=None,
+        resolved_prompt=None,
+        output=None,
+        summary=summary,
+        error=None,
+        retry_count=0,
+        max_retries=3,
+        blocked_reason=None,
+        unblock_response=None,
+        parent_task_id=None,
+        pipeline_id=pipeline_id,
+        stage_name=stage_name,
+        depends_on=[],
+        dependencies_met=True,
+        created_at=now,
+        started_at=now,
+        completed_at=None,
+        last_heartbeat=now,
+        stale=False,
+        role="worker",
+        timeout=None,
+    )
+
+
+class TestTodoCoverageHelpers:
+    def test_extract_repo_hints_prefers_existing_metadata(self):
+        now = datetime.now(UTC)
+        todo = TodoInfo(
+            id="todo-1",
+            title="Ship feature",
+            source_ref="terraform-enterprise/workbench: EPIC-99",
+            tags=["initiative:workspace-sync", "repo:terraform-enterprise", "foo/bar"],
+            created_at=now,
+            updated_at=now,
+        )
+
+        hints = _extract_repo_hints(todo)
+
+        assert "terraform-enterprise/workbench" in hints
+        assert "terraform-enterprise" in hints
+        assert "foo/bar" in hints
+
+    def test_task_matches_todo_by_jira_key(self):
+        now = datetime.now(UTC)
+        todo = TodoInfo(
+            id="todo-1",
+            title="Fix PROD-12",
+            jira_key="PROD-12",
+            created_at=now,
+            updated_at=now,
+        )
+        task = _make_task_info(
+            id="task-1",
+            source="Investigate PROD-12 rollout",
+            status=TaskStatus.RUNNING,
+        )
+
+        assert _task_matches_todo(todo, task, repo_hints=[]) is True
+
+
+class TestTodoCoverageRoute:
+    @pytest.mark.asyncio
+    async def test_returns_linked_and_unlinked_coverage(self):
+        session = AsyncMock()
+
+        linked_todo = _make_todo_row(
+            id="todo-linked",
+            title="Fix checkout",
+            jira_key="PROJ-42",
+            tags=json.dumps(["initiative:checkout"]),
+        )
+        unlinked_todo = _make_todo_row(
+            id="todo-unlinked", title="Write docs", tags=json.dumps(["initiative:docs"])
+        )
+
+        linked_task = _make_task_info(
+            id="task-linked",
+            source="Implement PROJ-42 bug fix",
+            status=TaskStatus.RUNNING,
+            repo="workbench",
+            pipeline_id="pipe-1",
+            stage_name="implement",
+            summary="Investigating and fixing checkout crash",
+        )
+        unrelated_task = _make_task_info(
+            id="task-other",
+            source="Unrelated maintenance",
+            status=TaskStatus.COMPLETED,
+            repo="atlas",
+        )
+
+        with patch("workbench.main.async_session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=session)
+            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with patch(
+                "workbench.main.list_todos", AsyncMock(return_value=[linked_todo, unlinked_todo])
+            ):
+                with patch(
+                    "workbench.main.list_tasks_since", AsyncMock(return_value=[object(), object()])
+                ):
+                    with patch(
+                        "workbench.main.list_pipelines_since",
+                        AsyncMock(return_value=[SimpleNamespace(id="pipe-1")]),
+                    ):
+                        with patch(
+                            "workbench.main.task_row_to_info",
+                            side_effect=[linked_task, unrelated_task],
+                        ):
+                            result = await list_todo_coverage_route(recent_hours=72)
+
+        assert isinstance(result, TodoCoverageListResponse)
+        assert isinstance(result.summary, TodoCoverageSummary)
+        assert result.summary.total_todos == 2
+        assert result.summary.covered_todos == 1
+        assert result.summary.uncovered_todos == 1
+        assert result.summary.active_linked_todos == 1
+
+        by_id = {c.todo_id: c for c in result.coverages}
+        assert by_id["todo-linked"].needs_task is False
+        assert by_id["todo-linked"].related_active_task_count == 1
+        assert by_id["todo-linked"].related_pipeline_count == 1
+        assert isinstance(by_id["todo-linked"], TodoCoverageInfo)
+        assert by_id["todo-linked"].active_tasks[0].id == "task-linked"
+
+        assert by_id["todo-unlinked"].needs_task is True
+        assert by_id["todo-unlinked"].related_recent_task_count == 0
+
+    @pytest.mark.asyncio
+    async def test_rejects_non_positive_recent_hours(self):
+        with pytest.raises(HTTPException) as exc:
+            await list_todo_coverage_route(recent_hours=0)
+
+        assert exc.value.status_code == 400
+        assert "recent_hours" in exc.value.detail

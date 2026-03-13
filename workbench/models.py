@@ -491,6 +491,53 @@ class TodoListResponse(BaseModel):
     total: int
 
 
+class TodoCoverageTaskRef(BaseModel):
+    """Task reference shown in todo coverage summaries."""
+
+    id: str
+    status: TaskStatus
+    repo: str | None = None
+    summary: str | None = None
+    pipeline_id: str | None = None
+    stage_name: str | None = None
+    created_at: datetime
+
+
+class TodoCoverageInfo(BaseModel):
+    """Coverage summary linking one todo to related tasks/pipelines."""
+
+    todo_id: str
+    jira_key: str | None = None
+    source_ref: str | None = None
+    initiative_tags: list[str] = Field(default_factory=list)
+    repo_hints: list[str] = Field(default_factory=list)
+    related_active_task_count: int = 0
+    related_recent_task_count: int = 0
+    related_pipeline_count: int = 0
+    active_tasks: list[TodoCoverageTaskRef] = Field(default_factory=list)
+    recent_tasks: list[TodoCoverageTaskRef] = Field(default_factory=list)
+    related_pipeline_ids: list[str] = Field(default_factory=list)
+    needs_task: bool = True
+
+
+class TodoCoverageSummary(BaseModel):
+    """High-level coverage counters for the board."""
+
+    total_todos: int
+    covered_todos: int
+    uncovered_todos: int
+    active_linked_todos: int
+
+
+class TodoCoverageListResponse(BaseModel):
+    """Todo coverage response returned by GET /todos/coverage."""
+
+    generated_at: datetime
+    recent_hours: int
+    coverages: list[TodoCoverageInfo]
+    summary: TodoCoverageSummary
+
+
 # ---------------------------------------------------------------------------
 # Workflow memory metadata models
 # ---------------------------------------------------------------------------

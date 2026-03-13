@@ -428,6 +428,29 @@ DASHBOARD_HTML = """\
   .kb-card-title { font-size: 13px; font-weight: 600; margin-bottom: 4px; word-break: break-word; }
   .kb-card-desc { font-size: 11px; color: var(--muted); margin-bottom: 6px; word-break: break-word; }
   .kb-card-meta { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+  .kb-card-context {
+    margin: 6px 0 7px; font-size: 10px; color: var(--muted);
+    display: flex; gap: 6px; flex-wrap: wrap;
+  }
+  .kb-context-chip {
+    border: 1px solid var(--border); border-radius: 10px; padding: 1px 7px;
+    background: rgba(255,255,255,0.03);
+  }
+  .kb-context-chip.gap {
+    border-color: rgba(248,81,73,0.45); color: var(--red);
+    background: rgba(248,81,73,0.08);
+  }
+  .kb-coverage-row {
+    margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap;
+  }
+  .kb-coverage-pill {
+    display: inline-block; padding: 1px 6px; border-radius: 10px;
+    font-size: 10px; border: 1px solid var(--border); color: var(--muted);
+  }
+  .kb-coverage-pill.active { border-color: rgba(88,166,255,0.45); color: var(--accent); }
+  .kb-coverage-pill.recent { border-color: rgba(63,185,80,0.45); color: var(--green); }
+  .kb-coverage-pill.pipeline { border-color: rgba(188,140,255,0.45); color: var(--purple); }
+  .kb-coverage-pill.gap { border-color: rgba(248,81,73,0.45); color: var(--red); }
 
   .kb-pill {
     display: inline-block; padding: 1px 7px; border-radius: 10px;
@@ -513,6 +536,21 @@ DASHBOARD_HTML = """\
     margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--border);
   }
   .kb-detail-meta-row span { display: flex; gap: 4px; }
+  .kb-detail-coverage {
+    margin-top: 14px; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px; background: rgba(255,255,255,0.02);
+  }
+  .kb-detail-coverage h4 {
+    font-size: 11px; text-transform: uppercase; color: var(--muted); margin-bottom: 8px;
+    letter-spacing: 0.5px;
+  }
+  .kb-detail-links { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+  .kb-detail-link {
+    display: flex; gap: 8px; align-items: center; font-size: 11px;
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+    background: var(--bg);
+  }
+  .kb-detail-link .task-id, .kb-detail-link .pipeline-id { font-size: 11px; }
 </style>
 </head>
 <body>
@@ -1794,6 +1832,8 @@ const KB_COLUMNS = [
 ];
 
 let kbTodos = [];
+let kbCoverageByTodoId = {};
+let kbCoverageSummary = null;
 let kbAutoRefreshTimer = null;
 let kbAutoRefreshOn = false;
 let kbDraggedCardId = null;
@@ -1814,9 +1854,25 @@ function kbStopAutoRefresh() {
 // --- Kanban API ---
 async function kbFetchTodos() {
   try {
-    const r = await apiFetch(API + '/todos?limit=500');
-    const data = await r.json();
+    const todosReq = apiFetch(API + '/todos?limit=500');
+    const coverageReq = apiFetch(API + '/todos/coverage?recent_hours=72');
+    const pair = await Promise.all([todosReq, coverageReq]);
+
+    const data = await pair[0].json();
+    const coverageData = await pair[1].json();
+
     kbTodos = Array.isArray(data) ? data : (data.todos || []);
+    kbCoverageByTodoId = {};
+    (coverageData.coverages || []).forEach(function(c) { kbCoverageByTodoId[c.todo_id] = c; });
+    kbCoverageSummary = coverageData.summary || null;
+
+    if (kbCoverageSummary) {
+      var label = document.getElementById('kbRefreshLabel');
+      if (label) {
+        label.textContent = kbCoverageSummary.uncovered_todos + ' needs task';
+      }
+    }
+
     kbApplyFilters();
   } catch (e) {
     showToast('Failed to load todos: ' + e.message, 'error');
@@ -1868,6 +1924,15 @@ function kbCardHtml(t) {
   var desc = (t.description || '');
   if (desc.length > 100) desc = desc.slice(0, 100) + '...';
   var tags = t.tags || [];
+  var coverage = kbCoverageByTodoId[t.id] || null;
+  var initiativeTag = '';
+  if (coverage && coverage.initiative_tags && coverage.initiative_tags.length > 0) {
+    initiativeTag = coverage.initiative_tags[0];
+  }
+  var repoHint = '';
+  if (coverage && coverage.repo_hints && coverage.repo_hints.length > 0) {
+    repoHint = coverage.repo_hints[0];
+  }
   var priorityCls = 'kb-pill-' + (t.priority || 'medium');
 
   var html = '<div class="kb-card" draggable="true" data-id="' + t.id + '"' +
@@ -1877,6 +1942,35 @@ function kbCardHtml(t) {
   if (desc) {
     html += '<div class="kb-card-desc">' + escHtml(desc) + '</div>';
   }
+  if (initiativeTag || t.jira_key || repoHint || (coverage && coverage.needs_task)) {
+    html += '<div class="kb-card-context">';
+    if (initiativeTag) {
+      html += '<span class="kb-context-chip">' + escHtml(initiativeTag) + '</span>';
+    }
+    if (t.jira_key) {
+      html += '<span class="kb-context-chip">' + escHtml(t.jira_key) + '</span>';
+    }
+    if (repoHint) {
+      html += '<span class="kb-context-chip">repo ' + escHtml(repoHint) + '</span>';
+    }
+    if (coverage && coverage.needs_task) {
+      html += '<span class="kb-context-chip gap">Needs task</span>';
+    }
+    html += '</div>';
+  }
+
+  if (coverage) {
+    html += '<div class="kb-coverage-row">';
+    if (coverage.needs_task) {
+      html += '<span class="kb-coverage-pill gap">no linked work</span>';
+    } else {
+      html += '<span class="kb-coverage-pill active">active ' + coverage.related_active_task_count + '</span>';
+      html += '<span class="kb-coverage-pill recent">recent ' + coverage.related_recent_task_count + '</span>';
+      html += '<span class="kb-coverage-pill pipeline">pipelines ' + coverage.related_pipeline_count + '</span>';
+    }
+    html += '</div>';
+  }
+
   html += '<div class="kb-card-meta">' +
     '<span class="kb-pill ' + priorityCls + '">' + (t.priority || 'medium') + '</span>';
 
@@ -2013,6 +2107,7 @@ function kbOpenDetail(id) {
   if (!t) return;
 
   var tagsStr = (t.tags || []).join(', ');
+  var coverage = kbCoverageByTodoId[id] || null;
 
   var html = '<h2 style="font-size:16px;margin-bottom:20px">Edit Card</h2>' +
     '<div class="kb-detail-field">' +
@@ -2052,6 +2147,8 @@ function kbOpenDetail(id) {
       '</div>' +
     '</div>';
   }
+
+  html += kbCoverageDetailHtml(coverage);
 
   html += '<div class="kb-detail-actions">' +
     '<button class="kb-btn-save" onclick="kbSaveDetail()">Save</button>' +
@@ -2103,11 +2200,60 @@ function kbSaveDetail() {
     var idx = kbTodos.findIndex(function(t) { return t.id === kbDetailTodoId; });
     if (idx !== -1) kbTodos[idx] = updated;
     kbApplyFilters();
+    kbFetchTodos();
     kbCloseDetail();
     showToast('Card updated', 'success');
   }).catch(function(err) {
     showToast('Failed to save: ' + err.message, 'error');
   });
+}
+
+function kbCoverageDetailHtml(coverage) {
+  if (!coverage) {
+    return '<div class="kb-detail-coverage"><h4>Work Coverage</h4><div style="font-size:11px;color:var(--muted)">Coverage unavailable.</div></div>';
+  }
+
+  var html = '<div class="kb-detail-coverage"><h4>Work Coverage</h4>' +
+    '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
+      '<span class="kb-coverage-pill active">active ' + coverage.related_active_task_count + '</span>' +
+      '<span class="kb-coverage-pill recent">recent ' + coverage.related_recent_task_count + '</span>' +
+      '<span class="kb-coverage-pill pipeline">pipelines ' + coverage.related_pipeline_count + '</span>' +
+      (coverage.needs_task ? '<span class="kb-coverage-pill gap">no linked work</span>' : '') +
+    '</div>';
+
+  if (coverage.active_tasks && coverage.active_tasks.length > 0) {
+    html += '<div class="kb-detail-links">';
+    coverage.active_tasks.forEach(function(taskRef) {
+      html += '<div class="kb-detail-link">' +
+        '<span class="task-id" onclick="event.stopPropagation(); switchTab(\'tasks\'); kbCloseDetail(); setTimeout(function(){ showDetail(\'' + taskRef.id + '\'); }, 50)">' + taskRef.id.slice(0, 12) + '</span>' +
+        '<span class="badge badge-' + taskRef.status + '">' + taskRef.status + '</span>' +
+        (taskRef.stage_name ? '<span style="color:var(--muted)">' + escHtml(taskRef.stage_name) + '</span>' : '') +
+      '</div>';
+    });
+    html += '</div>';
+  } else if (coverage.recent_tasks && coverage.recent_tasks.length > 0) {
+    html += '<div class="kb-detail-links">';
+    coverage.recent_tasks.slice(0, 5).forEach(function(taskRef) {
+      html += '<div class="kb-detail-link">' +
+        '<span class="task-id" onclick="event.stopPropagation(); switchTab(\'tasks\'); kbCloseDetail(); setTimeout(function(){ showDetail(\'' + taskRef.id + '\'); }, 50)">' + taskRef.id.slice(0, 12) + '</span>' +
+        '<span class="badge badge-' + taskRef.status + '">' + taskRef.status + '</span>' +
+      '</div>';
+    });
+    html += '</div>';
+  }
+
+  if (coverage.related_pipeline_ids && coverage.related_pipeline_ids.length > 0) {
+    html += '<div class="kb-detail-links">';
+    coverage.related_pipeline_ids.slice(0, 3).forEach(function(pid) {
+      html += '<div class="kb-detail-link">' +
+        '<span class="pipeline-id" onclick="event.stopPropagation(); switchTab(\'pipelines\'); kbCloseDetail(); setTimeout(function(){ showPipelineDetail(\'' + pid + '\'); }, 50)">' + pid.slice(0, 12) + '</span>' +
+      '</div>';
+    });
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
 }
 
 function kbDeleteDetail() {
