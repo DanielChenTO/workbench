@@ -492,6 +492,47 @@ class TodoListResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Workflow memory metadata models
+# ---------------------------------------------------------------------------
+
+
+class WorkflowMemoryCreate(BaseModel):
+    """Request body for creating workflow memory metadata."""
+
+    repo: str = Field(description="Repository short name for this memory artifact.")
+    kind: str = Field(description="Memory artifact kind (e.g. decision, plan, summary).")
+    artifact_ref: str = Field(description="Stable artifact reference identifier.")
+    tags: list[str] | None = Field(default=None, description="Optional tag labels.")
+    summary: str | None = Field(default=None, description="Optional human-readable summary.")
+    artifact_path: str | None = Field(default=None, description="Optional artifact file path.")
+    task_id: str | None = Field(default=None, description="Optional source task linkage.")
+    pipeline_id: str | None = Field(default=None, description="Optional source pipeline linkage.")
+
+
+class WorkflowMemoryInfo(BaseModel):
+    """Serialized workflow memory metadata record."""
+
+    id: str
+    repo: str
+    kind: str
+    artifact_ref: str
+    tags: list[str] | None = None
+    summary: str | None = None
+    artifact_path: str | None = None
+    task_id: str | None = None
+    pipeline_id: str | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkflowMemoryListResponse(BaseModel):
+    """Paginated list of workflow memory metadata records."""
+
+    memories: list[WorkflowMemoryInfo]
+    total: int
+
+
+# ---------------------------------------------------------------------------
 # Jira sync models
 # ---------------------------------------------------------------------------
 
@@ -655,6 +696,31 @@ def todo_row_to_info(row) -> TodoInfo:
         jira_last_synced=row.jira_last_synced,
         source=row.source,
         source_ref=row.source_ref,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
+    )
+
+
+def workflow_memory_row_to_info(row) -> WorkflowMemoryInfo:
+    """Convert a database.WorkflowMemoryRow into WorkflowMemoryInfo."""
+    tags: list[str] | None = None
+    raw_tags = getattr(row, "tags", None)
+    if raw_tags:
+        try:
+            tags = json.loads(raw_tags)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            tags = None
+
+    return WorkflowMemoryInfo(
+        id=row.id,
+        repo=row.repo,
+        kind=row.kind,
+        artifact_ref=row.artifact_ref,
+        tags=tags,
+        summary=row.summary,
+        artifact_path=row.artifact_path,
+        task_id=row.task_id,
+        pipeline_id=row.pipeline_id,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )

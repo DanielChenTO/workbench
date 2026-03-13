@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import Boolean, DateTime, Integer, String, Text, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -198,6 +198,26 @@ class ScheduleRow(Base):
         DateTime(timezone=True),
         default=lambda: datetime.now(UTC),
         onupdate=lambda: datetime.now(UTC),
+    )
+
+
+class WorkflowMemoryRow(Base):
+    """Workflow memory metadata record for retrieval indexing."""
+
+    __tablename__ = "workflow_memory"
+
+    id: Mapped[str] = mapped_column(String(12), primary_key=True)
+    repo: Mapped[str] = mapped_column(String(100), index=True)
+    kind: Mapped[str] = mapped_column(String(50), index=True)
+    tags: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_ref: Mapped[str] = mapped_column(Text)
+    artifact_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    task_id: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    pipeline_id: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
 
@@ -768,6 +788,110 @@ async def get_due_schedules(session: AsyncSession, now: datetime) -> list[Schedu
         )
         .order_by(ScheduleRow.next_run_at.asc())
     )
+    rows = (await session.execute(query)).scalars().all()
+    return list(rows)
+
+
+# ---------------------------------------------------------------------------
+# Workflow memory metadata helpers
+# ---------------------------------------------------------------------------
+
+
+async def create_workflow_memory(
+    session: AsyncSession,
+    *,
+    repo: str,
+    kind: str,
+    artifact_ref: str,
+    tags: str | None = None,
+    summary: str | None = None,
+    artifact_path: str | None = None,
+    task_id: str | None = None,
+    pipeline_id: str | None = None,
+) -> WorkflowMemoryRow:
+    """Insert a workflow memory metadata row and return it."""
+    row = WorkflowMemoryRow(
+        id=_new_id(),
+        repo=repo,
+        kind=kind,
+        tags=tags,
+        summary=summary,
+        artifact_ref=artifact_ref,
+        artifact_path=artifact_path,
+        task_id=task_id,
+        pipeline_id=pipeline_id,
+    )
+    session.add(row)
+    await session.commit()
+    await session.refresh(row)
+    return row
+
+
+async def get_workflow_memory(
+    session: AsyncSession,
+    memory_id: str,
+) -> WorkflowMemoryRow | None:
+    """Fetch a single workflow memory row by ID."""
+    return await session.get(WorkflowMemoryRow, memory_id)
+
+
+async def list_workflow_memory(
+    session: AsyncSession,
+    *,
+    repo: str | None = None,
+    kind: str | None = None,
+    since: datetime | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[WorkflowMemoryRow]:
+    """List workflow memory rows with optional filters, newest first."""
+    query = select(WorkflowMemoryRow)
+
+    if repo:
+        query = query.where(WorkflowMemoryRow.repo == repo)
+    if kind:
+        query = query.where(WorkflowMemoryRow.kind == kind)
+    if since:
+        query = query.where(WorkflowMemoryRow.created_at >= since)
+
+    query = query.order_by(WorkflowMemoryRow.created_at.desc()).offset(offset).limit(limit)
+    rows = (await session.execute(query)).scalars().all()
+    return list(rows)
+
+
+async def query_workflow_memory(
+    session: AsyncSession,
+    *,
+    repo: str | None = None,
+    kind: str | None = None,
+    tag: str | None = None,
+    summary_query: str | None = None,
+    recent_hours: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> list[WorkflowMemoryRow]:
+    """Query workflow memory rows by repo/kind/tag/summary/recency."""
+    query = select(WorkflowMemoryRow)
+
+    if repo:
+        query = query.where(WorkflowMemoryRow.repo == repo)
+    if kind:
+        query = query.where(WorkflowMemoryRow.kind == kind)
+    if tag:
+        query = query.where(
+            WorkflowMemoryRow.tags.isnot(None),
+            WorkflowMemoryRow.tags.contains(f'"{tag}"'),
+        )
+    if summary_query:
+        query = query.where(
+            WorkflowMemoryRow.summary.isnot(None),
+            WorkflowMemoryRow.summary.ilike(f"%{summary_query}%"),
+        )
+    if recent_hours is not None and recent_hours >= 0:
+        cutoff = datetime.now(UTC) - timedelta(hours=recent_hours)
+        query = query.where(WorkflowMemoryRow.created_at >= cutoff)
+
+    query = query.order_by(WorkflowMemoryRow.created_at.desc()).offset(offset).limit(limit)
     rows = (await session.execute(query)).scalars().all()
     return list(rows)
 
