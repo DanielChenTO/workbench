@@ -70,6 +70,9 @@ from .models import (
     TodoCreate,
     TodoInfo,
     TodoListResponse,
+    TodoReconcileItem,
+    TodoReconcileRequest,
+    TodoReconcileResponse,
     TodoReorder,
     TodoUpdate,
     schedule_row_to_info,
@@ -764,6 +767,25 @@ def _to_coverage_task_ref(task: TaskInfo) -> TodoCoverageTaskRef:
     )
 
 
+def _normalize_runtime_validation_key(todo: TodoInfo) -> str | None:
+    tokens = [todo.title or "", todo.source_ref or ""] + (todo.tags or [])
+    joined = " ".join(tokens).lower()
+    if "runtime validation" not in joined and "runtime-validation" not in joined:
+        return None
+
+    normalized = re.sub(r"[^a-z0-9]+", " ", (todo.title or "").lower()).strip()
+    if not normalized:
+        normalized = (todo.jira_key or todo.source_ref or todo.id).lower()
+    return normalized
+
+
+def _merge_tags(existing: list[str] | None, new_tag: str) -> list[str]:
+    tags = list(existing or [])
+    if new_tag not in tags:
+        tags.append(new_tag)
+    return tags
+
+
 @app.get("/todos/coverage", response_model=TodoCoverageListResponse)
 async def list_todo_coverage_route(recent_hours: int = 72):
     """Return todo-to-task/pipeline linkage coverage for the board UX."""
@@ -848,6 +870,210 @@ async def list_todo_coverage_route(recent_hours: int = 72):
         recent_hours=recent_hours,
         coverages=coverages,
         summary=summary,
+    )
+
+
+@app.post("/todos/reconcile", response_model=TodoReconcileResponse)
+async def reconcile_todos_route(body: TodoReconcileRequest):
+    """Reconcile todo/task/pipeline state conservatively.
+
+    Default mode is report-only. When ``apply_fixes=true``, applies low-risk
+    metadata/status updates only.
+    """
+    import json as _json
+    from datetime import timedelta
+
+    cutoff = datetime.now(UTC) - timedelta(hours=72)
+
+    async with async_session() as session:
+        todo_rows = await list_todos(session, limit=1000)
+        recent_task_rows = await list_tasks_since(session, since=cutoff)
+        active_task_rows: list[TaskRow] = []
+        for status in sorted(_ACTIVE_TASK_STATUSES):
+            status_rows, _ = await list_tasks(session, status=status, limit=1000, offset=0)
+            active_task_rows.extend(status_rows)
+        pipeline_rows, _ = await list_pipelines(session, limit=2000, offset=0)
+
+    todos = [todo_row_to_info(row) for row in todo_rows]
+    recent_tasks = [task_row_to_info(row) for row in recent_task_rows]
+    all_task_rows_by_id: dict[str, TaskRow] = {row.id: row for row in recent_task_rows}
+    for row in active_task_rows:
+        all_task_rows_by_id[row.id] = row
+    all_tasks = [task_row_to_info(row) for row in all_task_rows_by_id.values()]
+    pipelines = [_pipeline_row_to_info(row) for row in pipeline_rows]
+    pipeline_status_by_id = {p.id: p.status.value for p in pipelines}
+
+    auto_fixed: list[TodoReconcileItem] = []
+    report_only: list[TodoReconcileItem] = []
+
+    runtime_validation_groups: dict[str, list[TodoInfo]] = {}
+    for todo in todos:
+        key = _normalize_runtime_validation_key(todo)
+        if key:
+            runtime_validation_groups.setdefault(key, []).append(todo)
+
+    duplicate_runtime_validation_ids: set[str] = set()
+    for group in runtime_validation_groups.values():
+        if len(group) <= 1:
+            continue
+        sorted_group = sorted(group, key=lambda t: t.created_at)
+        for dup in sorted_group[1:]:
+            duplicate_runtime_validation_ids.add(dup.id)
+
+    async with async_session() as session:
+        for todo in todos:
+            repo_hints = _extract_repo_hints(todo)
+            related_all = [t for t in all_tasks if _task_matches_todo(todo, t, repo_hints)]
+            active_tasks = [t for t in related_all if t.status.value in _ACTIVE_TASK_STATUSES]
+            recent_related = [t for t in recent_tasks if _task_matches_todo(todo, t, repo_hints)]
+
+            related_pipeline_ids = sorted({t.pipeline_id for t in related_all if t.pipeline_id})
+            related_pipeline_statuses = [
+                pipeline_status_by_id[pid]
+                for pid in related_pipeline_ids
+                if pid in pipeline_status_by_id
+            ]
+
+            if todo.status == "in_progress" and not active_tasks:
+                detail = "Todo is in_progress but has no linked active task."
+                if body.apply_fixes:
+                    row = await update_todo(
+                        session,
+                        todo.id,
+                        status="review",
+                        tags=_json.dumps(_merge_tags(todo.tags, "reconcile:auto-paused")),
+                    )
+                    if row is not None:
+                        auto_fixed.append(
+                            TodoReconcileItem(
+                                todo_id=todo.id,
+                                issue="stale_in_progress_no_running_task",
+                                detail=detail,
+                                action="Moved to review and tagged reconcile:auto-paused.",
+                            )
+                        )
+                        todo = todo_row_to_info(row)
+                else:
+                    report_only.append(
+                        TodoReconcileItem(
+                            todo_id=todo.id,
+                            issue="stale_in_progress_no_running_task",
+                            detail=detail,
+                            action="Report-only: consider moving to review/blocked.",
+                        )
+                    )
+
+            if todo.status == "in_progress" and active_tasks:
+                active_statuses = {t.status.value for t in active_tasks}
+                if active_statuses.issubset({"blocked", "stuck"}):
+                    detail = "All linked active tasks are blocked/stuck."
+                    if body.apply_fixes:
+                        row = await update_todo(
+                            session,
+                            todo.id,
+                            status="review",
+                            tags=_json.dumps(_merge_tags(todo.tags, "reconcile:blocked-like")),
+                        )
+                        if row is not None:
+                            auto_fixed.append(
+                                TodoReconcileItem(
+                                    todo_id=todo.id,
+                                    issue="blocked_like_in_progress",
+                                    detail=detail,
+                                    action="Moved to review and tagged reconcile:blocked-like.",
+                                )
+                            )
+                            todo = todo_row_to_info(row)
+                    else:
+                        report_only.append(
+                            TodoReconcileItem(
+                                todo_id=todo.id,
+                                issue="blocked_like_in_progress",
+                                detail=detail,
+                                action="Report-only: likely blocked; consider review column.",
+                            )
+                        )
+
+            if todo.status == "done" and active_tasks:
+                report_only.append(
+                    TodoReconcileItem(
+                        todo_id=todo.id,
+                        issue="done_with_active_work",
+                        detail="Todo is done but linked active work still exists.",
+                        action="Report-only: verify whether todo should be reopened.",
+                    )
+                )
+
+            if (
+                todo.status in {"in_progress", "review"}
+                and related_pipeline_statuses
+                and all(s in {"failed", "cancelled"} for s in related_pipeline_statuses)
+            ):
+                report_only.append(
+                    TodoReconcileItem(
+                        todo_id=todo.id,
+                        issue="pipeline_state_mismatch",
+                        detail=(
+                            "Linked pipelines are terminal failed/cancelled "
+                            "while todo remains active."
+                        ),
+                        action="Report-only: likely needs manual triage or blocked handling.",
+                    )
+                )
+
+            if todo.id in duplicate_runtime_validation_ids:
+                detail = "Duplicate runtime-validation todo detected."
+                if body.apply_fixes and todo.status != "done":
+                    row = await update_todo(
+                        session,
+                        todo.id,
+                        status="review",
+                        tags=_json.dumps(
+                            _merge_tags(todo.tags, "reconcile:duplicate-runtime-validation")
+                        ),
+                    )
+                    if row is not None:
+                        auto_fixed.append(
+                            TodoReconcileItem(
+                                todo_id=todo.id,
+                                issue="duplicate_runtime_validation",
+                                detail=detail,
+                                action=(
+                                    "Moved duplicate to review and tagged "
+                                    "reconcile:duplicate-runtime-validation."
+                                ),
+                            )
+                        )
+                else:
+                    report_only.append(
+                        TodoReconcileItem(
+                            todo_id=todo.id,
+                            issue="duplicate_runtime_validation",
+                            detail=detail,
+                            action="Report-only: consolidate duplicate runtime-validation todos.",
+                        )
+                    )
+
+            if todo.status == "in_progress" and not active_tasks and recent_related:
+                report_only.append(
+                    TodoReconcileItem(
+                        todo_id=todo.id,
+                        issue="stale_claim_possible",
+                        detail=(
+                            "Todo has linked recent tasks but none active; "
+                            "stale ownership/claim is possible but not "
+                            "explicitly modeled."
+                        ),
+                        action="Report-only: verify owner/claim outside current schema.",
+                    )
+                )
+
+    return TodoReconcileResponse(
+        analyzed_todos=len(todos),
+        analyzed_tasks=len(all_tasks),
+        analyzed_pipelines=len(pipelines),
+        auto_fixed=auto_fixed,
+        report_only=report_only,
     )
 
 

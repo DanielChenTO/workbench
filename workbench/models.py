@@ -538,6 +538,36 @@ class TodoCoverageListResponse(BaseModel):
     summary: TodoCoverageSummary
 
 
+class TodoReconcileRequest(BaseModel):
+    """Request body for POST /todos/reconcile."""
+
+    apply_fixes: bool = Field(
+        default=False,
+        description=(
+            "When false, produce a report only. When true, apply low-risk metadata/status fixes."
+        ),
+    )
+
+
+class TodoReconcileItem(BaseModel):
+    """Single reconcile finding or action."""
+
+    todo_id: str
+    issue: str
+    detail: str
+    action: str
+
+
+class TodoReconcileResponse(BaseModel):
+    """Response from POST /todos/reconcile."""
+
+    analyzed_todos: int
+    analyzed_tasks: int
+    analyzed_pipelines: int
+    auto_fixed: list[TodoReconcileItem] = Field(default_factory=list)
+    report_only: list[TodoReconcileItem] = Field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # Workflow memory metadata models
 # ---------------------------------------------------------------------------

@@ -23,6 +23,7 @@ from workbench.main import (
     _extract_repo_hints,
     _task_matches_todo,
     list_todo_coverage_route,
+    reconcile_todos_route,
     reorder_todo_route,
     update_todo_route,
 )
@@ -38,6 +39,7 @@ from workbench.models import (
     TodoCreate,
     TodoInfo,
     TodoListResponse,
+    TodoReconcileRequest,
     TodoReorder,
     TodoUpdate,
     todo_row_to_info,
@@ -921,3 +923,94 @@ class TestTodoCoverageRoute:
 
         assert exc.value.status_code == 400
         assert "recent_hours" in exc.value.detail
+
+
+class TestTodoReconcileRoute:
+    @pytest.mark.asyncio
+    async def test_report_only_detects_stale_in_progress_and_duplicates(self):
+        session = AsyncMock()
+
+        stale_todo = _make_todo_row(
+            id="todo-stale",
+            title="Investigate incident",
+            status="in_progress",
+            jira_key="PROJ-1",
+        )
+        rv_primary = _make_todo_row(
+            id="todo-rv-1",
+            title="Runtime Validation - Atlas",
+            status="todo",
+            tags=json.dumps(["runtime-validation"]),
+        )
+        rv_duplicate = _make_todo_row(
+            id="todo-rv-2",
+            title="Runtime Validation Atlas",
+            status="todo",
+            tags=json.dumps(["runtime validation"]),
+        )
+
+        with patch("workbench.main.async_session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=session)
+            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with patch(
+                "workbench.main.list_todos",
+                AsyncMock(return_value=[stale_todo, rv_primary, rv_duplicate]),
+            ):
+                with patch("workbench.main.list_tasks_since", AsyncMock(return_value=[])):
+                    with patch("workbench.main.list_tasks", AsyncMock(return_value=([], 0))):
+                        with patch(
+                            "workbench.main.list_pipelines", AsyncMock(return_value=([], 0))
+                        ):
+                            result = await reconcile_todos_route(
+                                TodoReconcileRequest(apply_fixes=False)
+                            )
+
+        assert result.analyzed_todos == 3
+        assert result.analyzed_tasks == 0
+        assert result.analyzed_pipelines == 0
+        assert result.auto_fixed == []
+        issues = {item.issue for item in result.report_only}
+        assert "stale_in_progress_no_running_task" in issues
+        assert "duplicate_runtime_validation" in issues
+
+    @pytest.mark.asyncio
+    async def test_apply_fixes_moves_stale_todo_to_review(self):
+        session = AsyncMock()
+
+        stale_todo = _make_todo_row(
+            id="todo-stale",
+            title="Investigate incident",
+            status="in_progress",
+            jira_key="PROJ-1",
+        )
+
+        updated_row = _make_todo_row(
+            id="todo-stale",
+            title="Investigate incident",
+            status="review",
+            jira_key="PROJ-1",
+            tags=json.dumps(["reconcile:auto-paused"]),
+        )
+
+        with patch("workbench.main.async_session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=session)
+            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with patch("workbench.main.list_todos", AsyncMock(return_value=[stale_todo])):
+                with patch("workbench.main.list_tasks_since", AsyncMock(return_value=[])):
+                    with patch("workbench.main.list_tasks", AsyncMock(return_value=([], 0))):
+                        with patch(
+                            "workbench.main.list_pipelines", AsyncMock(return_value=([], 0))
+                        ):
+                            with patch(
+                                "workbench.main.update_todo",
+                                AsyncMock(return_value=updated_row),
+                            ) as mock_update:
+                                result = await reconcile_todos_route(
+                                    TodoReconcileRequest(apply_fixes=True)
+                                )
+
+        assert len(result.auto_fixed) >= 1
+        assert any(item.issue == "stale_in_progress_no_running_task" for item in result.auto_fixed)
+        assert mock_update.await_count >= 1
