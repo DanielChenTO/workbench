@@ -954,7 +954,11 @@ async def update_todo(
     stmt = update(TodoRow).where(TodoRow.id == todo_id).values(**fields)
     await session.execute(stmt)
     await session.commit()
-    return await session.get(TodoRow, todo_id)
+    row = await session.get(TodoRow, todo_id)
+    if row is None:
+        return None
+    await session.refresh(row)
+    return row
 
 
 async def get_todo(session: AsyncSession, todo_id: str) -> TodoRow | None:

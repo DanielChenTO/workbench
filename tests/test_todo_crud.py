@@ -5,14 +5,14 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
 from workbench.database import (
     TodoRow,
     count_todos,
-    create_todo,
     delete_todo,
     get_todo,
     list_todos,
@@ -27,12 +27,12 @@ from workbench.models import (
     TodoUpdate,
     todo_row_to_info,
 )
+from workbench.main import reorder_todo_route, update_todo_route
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
 def _make_todo_row(**overrides) -> SimpleNamespace:
     """Build a minimal fake TodoRow suitable for todo_row_to_info."""
     now = datetime.now(UTC)
@@ -554,6 +554,53 @@ class TestCountTodos:
 
 
 # ===========================================================================
+# Todo mutation route guardrails
+# ===========================================================================
+
+
+class TestTodoMutationRoutes:
+    @pytest.mark.asyncio
+    async def test_update_route_returns_404_when_update_returns_none(self):
+        """PATCH route should fail closed with 404, not 500."""
+        session = AsyncMock()
+        existing = _make_todo_row(id="todo-404")
+
+        with patch("workbench.main.async_session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=session)
+            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with patch("workbench.main.get_todo", AsyncMock(return_value=existing)):
+                with patch("workbench.main.update_todo", AsyncMock(return_value=None)):
+                    with pytest.raises(HTTPException) as exc:
+                        await update_todo_route("todo-404", TodoUpdate(status="done"))
+
+        assert exc.value.status_code == 404
+        assert exc.value.detail == "Todo todo-404 not found"
+
+    @pytest.mark.asyncio
+    async def test_reorder_route_returns_404_when_update_returns_none(self):
+        """Reorder route should fail closed with 404, not 500."""
+        session = AsyncMock()
+        existing = _make_todo_row(id="todo-404", status="todo", column_order=1)
+
+        with patch("workbench.main.async_session") as mock_session_ctx:
+            mock_session_ctx.return_value.__aenter__ = AsyncMock(return_value=session)
+            mock_session_ctx.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            with patch("workbench.main.get_todo", AsyncMock(return_value=existing)):
+                with patch("workbench.main.update_todo", AsyncMock(return_value=None)):
+                    with patch("workbench.database.shift_todo_siblings", AsyncMock()):
+                        with pytest.raises(HTTPException) as exc:
+                            await reorder_todo_route(
+                                "todo-404",
+                                TodoReorder(status="review", order=0),
+                            )
+
+        assert exc.value.status_code == 404
+        assert exc.value.detail == "Todo todo-404 not found"
+
+
+# ===========================================================================
 # TodoListResponse model
 # ===========================================================================
 
@@ -565,8 +612,14 @@ class TestTodoListResponse:
         """TodoListResponse should hold a list of TodoInfo and a total."""
         now = datetime.now(UTC)
         todo = TodoInfo(
-            id="t1", title="Test", status="backlog", priority="high",
-            column_order=0, source="manual", created_at=now, updated_at=now,
+            id="t1",
+            title="Test",
+            status="backlog",
+            priority="high",
+            column_order=0,
+            source="manual",
+            created_at=now,
+            updated_at=now,
         )
         resp = TodoListResponse(todos=[todo], total=1)
         assert len(resp.todos) == 1
@@ -583,8 +636,14 @@ class TestTodoListResponse:
         """total represents the full count, not just the page."""
         now = datetime.now(UTC)
         todo = TodoInfo(
-            id="t1", title="Test", status="backlog", priority="medium",
-            column_order=0, source="manual", created_at=now, updated_at=now,
+            id="t1",
+            title="Test",
+            status="backlog",
+            priority="medium",
+            column_order=0,
+            source="manual",
+            created_at=now,
+            updated_at=now,
         )
         resp = TodoListResponse(todos=[todo], total=100)
         assert len(resp.todos) == 1

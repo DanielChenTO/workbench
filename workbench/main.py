@@ -713,6 +713,8 @@ async def update_todo_route(todo_id: str, body: TodoUpdate):
             raise HTTPException(status_code=400, detail="No fields to update")
 
         updated = await update_todo(session, todo_id, **update_fields)
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"Todo {todo_id} not found")
     return todo_row_to_info(updated)
 
 
@@ -750,6 +752,8 @@ async def reorder_todo_route(todo_id: str, body: TodoReorder):
             status=body.status,
             column_order=body.order,
         )
+        if updated is None:
+            raise HTTPException(status_code=404, detail=f"Todo {todo_id} not found")
     return todo_row_to_info(updated)
 
 
