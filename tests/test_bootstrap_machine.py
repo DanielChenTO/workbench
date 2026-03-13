@@ -31,6 +31,10 @@ def test_build_bootstrap_plan_with_existing_workbench(tmp_path: Path):
     assert "migrate_database" in names
     assert "install_workspace_integration" in names
 
+    install_step = next(step for step in plan if step.name == "install_workspace_integration")
+    assert install_step.command[0].endswith(".venv/bin/python")
+    assert install_step.command[1].endswith("scripts/setup-opencode-workspace.py")
+
 
 def test_build_bootstrap_plan_with_fresh_workbench_and_external_db(tmp_path: Path):
     workspace = tmp_path / "workspace"
